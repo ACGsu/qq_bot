@@ -5,7 +5,7 @@ from typing import Any
 from .common import CommandContext, at_segment, text_segment
 
 
-BAN_SECONDS = 5 * 60
+BAN_SECONDS =  60
 RPS_CHOICES = ("石头", "剪刀", "布")
 RPS_BEATS = {
     "石头": "剪刀",
@@ -48,7 +48,7 @@ def format_rps_result(challenger_id: str, target_id: str, result: RpsResult) -> 
             [
                 text_segment("输家："),
                 at_segment(result.loser_id),
-                text_segment("，禁言5分钟。"),
+                text_segment("，禁言1分钟。"),
             ]
         )
     return segments

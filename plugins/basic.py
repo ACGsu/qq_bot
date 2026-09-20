@@ -1,57 +1,44 @@
+import logging
 from typing import Any
 
-from plugin_control import default_enabled_plugin_ids, normalize_enabled_plugin_ids
-
-from .common import CommandContext
-
-
-HELP_LINES_BY_PLUGIN: dict[str, tuple[str, ...]] = {
-    "basic": (
-        "/help - 查看指令列表",
-        "/hello - 回复 啦啦啦",
-    ),
-    "rps": (
-        "/猜拳 @成员 - 与成员猜拳，输家禁言 5 分钟",
-    ),
-    "daily_wife": (
-        "/今日群友 - 随机抽取今日群友老婆",
-        "/结芬 - 向今日群友老婆发起结芬请求",
-        "/愿意 或 /不愿意 - 回复结芬请求",
-    ),
-    "courtship": (
-        "/求偶 @成员 - 向成员发起求偶请求",
-        "/接受求偶 或 /拒绝求偶 - 回复求偶请求",
-    ),
-    "song": (
-        "/song 歌曲名 - 搜索歌曲并列出候选",
-        "/song 序号 - 下载所选歌曲",
-    ),
-    "novel": (
-        "/novel 小说名 - 查询轻小说目录链接",
-        "/第1章 或 /第1卷 - 返回上次查询小说的对应链接",
-    ),
-    "summary": (
-        "/总结 条数n - 调用 DeepSeek 总结最近 n 条群聊消息，最多 500 条",
-    ),
-}
+from .common import CommandContext, command_argument
+# Keep the existing text-help imports available to callers of plugins.basic.
+from .help_menu import (
+    HELP_LINES_BY_PLUGIN,
+    MARRIAGE_HELP_LINES,
+    build_help_card,
+    format_help,
+    format_help_topic,
+)
 
 
-def format_help(enabled_plugin_ids: tuple[str, ...] | None = None) -> str:
-    source_plugin_ids = default_enabled_plugin_ids() if enabled_plugin_ids is None else enabled_plugin_ids
-    plugin_ids = normalize_enabled_plugin_ids(source_plugin_ids)
-    lines = ["可用指令："]
-    for plugin_id in plugin_ids:
-        lines.extend(HELP_LINES_BY_PLUGIN.get(plugin_id, ()))
-    return "\n".join(lines)
+LOGGER = logging.getLogger("qq-bot")
+HELP_CARD_TIMEOUT_SECONDS = 30
+HELP_CARD_FALLBACK_PREFIX = "卡片发送未确认，已切换为文字帮助。\n\n"
 
 
-def dispatch_command(command: str, enabled_plugin_ids: tuple[str, ...] | None = None) -> str | None:
+def dispatch_command(
+    command: str,
+    enabled_plugin_ids: tuple[str, ...] | None = None,
+    plugin_settings: dict[str, dict[str, str]] | None = None,
+) -> str | None:
     command_name = command.split(maxsplit=1)[0] if command else ""
     if command_name == "/help":
-        return format_help(enabled_plugin_ids)
+        return format_help_topic(command_argument(command), enabled_plugin_ids, plugin_settings)
     if command_name == "/hello":
         return "啦啦啦"
     return None
+
+
+def _has_message_id(response: Any) -> bool:
+    data = response.get("data") if isinstance(response, dict) else None
+    message_id = data.get("message_id") if isinstance(data, dict) else None
+    if type(message_id) is int:
+        return True
+    if isinstance(message_id, str):
+        digits = message_id.removeprefix("-")
+        return digits.isascii() and digits.isdecimal()
+    return False
 
 
 class BasicCommandPlugin:
@@ -60,6 +47,29 @@ class BasicCommandPlugin:
 
     async def handle(self, bot: Any, websocket: Any, event: dict[str, Any], context: CommandContext) -> None:
         enabled_plugin_ids = getattr(bot, "enabled_plugin_ids", None)
-        reply = dispatch_command(context.text, enabled_plugin_ids)
-        if reply:
-            await bot._send_reply(websocket, event, reply)
+        plugin_settings = getattr(bot, "plugin_settings", None)
+        reply = dispatch_command(context.text, enabled_plugin_ids, plugin_settings)
+        if reply is None:
+            return
+
+        if context.text.strip() == "/help" and event.get("message_type") == "group":
+            try:
+                bot_qq = event.get("self_id") or getattr(getattr(bot, "config", None), "bot_qq", None)
+                params = build_help_card(bot_qq, enabled_plugin_ids, plugin_settings)
+                params["group_id"] = str(event["group_id"])
+                response = await bot._send_action_request(
+                    websocket,
+                    "send_group_forward_msg",
+                    params,
+                    timeout=HELP_CARD_TIMEOUT_SECONDS,
+                )
+                if not _has_message_id(response):
+                    raise RuntimeError("Help card send returned no valid message_id")
+                # QQ can render nested cards even when get_forward_msg reads back empty children.
+                # The send acknowledgement is sufficient; do not fetch or resend the card.
+                return
+            except Exception as exc:
+                LOGGER.warning("Help card send not confirmed (%s); falling back to text", type(exc).__name__)
+                reply = HELP_CARD_FALLBACK_PREFIX + reply
+
+        await bot._send_reply(websocket, event, reply)

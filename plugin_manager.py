@@ -5,7 +5,13 @@ from pathlib import Path
 from tkinter import messagebox, ttk
 from typing import Callable
 
-from plugin_control import PLUGIN_DEFINITIONS, get_plugin_config_path, load_plugin_config, save_plugin_config
+from plugin_control import (
+    PLUGIN_DEFINITIONS,
+    get_plugin_config_path,
+    load_plugin_config,
+    parse_bool_setting,
+    save_plugin_config,
+)
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -29,7 +35,7 @@ class PluginManagerApp(tk.Tk):
         self.configure(bg=self.BG)
 
         self.plugin_vars: dict[str, tk.BooleanVar] = {}
-        self.setting_vars: dict[str, dict[str, tk.StringVar]] = {}
+        self.setting_vars: dict[str, dict[str, tk.StringVar | tk.BooleanVar]] = {}
         self.status_var = tk.StringVar(value="准备就绪")
         self.docker_status_var = tk.StringVar(value="未刷新")
         self.enabled_summary_var = tk.StringVar(value="")
@@ -197,7 +203,7 @@ class PluginManagerApp(tk.Tk):
 
     def _add_plugin_row(self, plugin_id: str, index: int) -> None:
         plugin = next(item for item in PLUGIN_DEFINITIONS if item.plugin_id == plugin_id)
-        var = tk.BooleanVar(value=True)
+        var = tk.BooleanVar(master=self, value=True)
         var.trace_add("write", lambda *_args: self._update_enabled_summary())
         self.plugin_vars[plugin.plugin_id] = var
 
@@ -231,6 +237,51 @@ class PluginManagerApp(tk.Tk):
             ttk.Entry(settings_frame, textvariable=target_qq_var, width=18).grid(row=0, column=1, sticky="ew", padx=(0, 14))
             ttk.Label(settings_frame, text="表情 ID 列表", style="RowMeta.TLabel").grid(row=0, column=2, sticky="w", padx=(0, 8))
             ttk.Entry(settings_frame, textvariable=emoji_ids_var, width=18).grid(row=0, column=3, sticky="ew")
+
+        if plugin.plugin_id == "daily_wife":
+            settings_frame = ttk.Frame(content, style="Surface.TFrame")
+            settings_frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(10, 0), padx=(12, 0))
+            settings_frame.columnconfigure(0, weight=1)
+
+            marriage_enabled_var = tk.BooleanVar(master=self, value=True)
+            self.setting_vars[plugin.plugin_id] = {"marriage_enabled": marriage_enabled_var}
+            marriage_switch = ttk.Checkbutton(
+                settings_frame,
+                text="启用结芬子功能",
+                variable=marriage_enabled_var,
+                style="Switch.TCheckbutton",
+            )
+            marriage_switch.grid(row=0, column=0, sticky="w")
+            var.trace_add("write", lambda *_args: marriage_switch.state(["!disabled" if var.get() else "disabled"]))
+            ttk.Label(
+                settings_frame,
+                text="关闭后仅保留每日抽取，不处理 /结芬 及其回应指令。",
+                style="RowMeta.TLabel",
+                wraplength=420,
+            ).grid(row=1, column=0, sticky="w", pady=(4, 0))
+
+        if plugin.plugin_id == "timetable":
+            settings_frame = ttk.Frame(content, style="Surface.TFrame")
+            settings_frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(10, 0), padx=(12, 0))
+            settings_frame.columnconfigure(0, weight=1)
+
+            isolation_var = tk.BooleanVar(master=self, value=True)
+            self.setting_vars[plugin.plugin_id] = {"group_isolation_enabled": isolation_var}
+            isolation_switch = ttk.Checkbutton(
+                settings_frame,
+                text="启用群聊隔离",
+                variable=isolation_var,
+                style="Switch.TCheckbutton",
+            )
+            isolation_switch.grid(row=0, column=0, sticky="w")
+            var.trace_add("write", lambda *_args: isolation_switch.state(["!disabled" if var.get() else "disabled"]))
+            ttk.Label(
+                settings_frame,
+                text=("默认开启：各群独立课表。关闭后同一 QQ 跨群共享最近更新的一份课表，"
+                      "其他共同群成员也可通过 /课ing 查阅。点击“保存并应用”后生效。"),
+                style="RowMeta.TLabel",
+                wraplength=420,
+            ).grid(row=1, column=0, sticky="w", pady=(4, 0))
 
         if plugin.plugin_id == "summary":
             settings_frame = ttk.Frame(content, style="Surface.TFrame")
@@ -270,7 +321,10 @@ class PluginManagerApp(tk.Tk):
         for plugin_id, plugin_setting_vars in self.setting_vars.items():
             settings = plugin_config.plugin_settings.get(plugin_id, {})
             for key, setting_var in plugin_setting_vars.items():
-                setting_var.set(settings.get(key, setting_var.get()))
+                if isinstance(setting_var, tk.BooleanVar):
+                    setting_var.set(parse_bool_setting(settings.get(key), default=True))
+                else:
+                    setting_var.set(settings.get(key, setting_var.get()))
         self._update_enabled_summary()
         self.status_var.set(f"已加载配置：启用 {len(enabled)} / {len(PLUGIN_DEFINITIONS)} 个插件")
 
@@ -279,7 +333,10 @@ class PluginManagerApp(tk.Tk):
 
     def _selected_plugin_settings(self) -> dict[str, dict[str, str]]:
         return {
-            plugin_id: {key: var.get().strip() for key, var in plugin_setting_vars.items()}
+            plugin_id: {
+                key: ("true" if var.get() else "false") if isinstance(var, tk.BooleanVar) else var.get().strip()
+                for key, var in plugin_setting_vars.items()
+            }
             for plugin_id, plugin_setting_vars in self.setting_vars.items()
         }
 

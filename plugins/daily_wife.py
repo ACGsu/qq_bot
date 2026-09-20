@@ -4,9 +4,13 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from plugin_control import parse_bool_setting
+
 from .common import CommandContext, at_segment, qq_avatar_segment, text_segment, today_date_key
 
 
+DAILY_WIFE_COMMANDS = {"/今日群友", "/今日老婆"}
+MARRIAGE_HINT = "\n结芬~：输入 @bot /结芬 发起结芬请求"
 MARRIAGE_RESPONSE_SECONDS = 2 * 60
 MARRIAGE_ACCEPT_COMMANDS = {"/愿意", "愿意", "/同意", "同意", "/接受", "接受"}
 MARRIAGE_REJECT_COMMANDS = {"/不愿意", "不愿意", "/拒绝", "拒绝", "/不要", "不要"}
@@ -60,35 +64,42 @@ def wife_candidates(members: list[dict[str, Any]], requester_id: str) -> list[di
     return candidates
 
 
-def format_daily_wife_new(record: DailyWifeRecord) -> list[dict[str, Any]]:
+def format_daily_wife_new(record: DailyWifeRecord, marriage_enabled: bool = True) -> list[dict[str, Any]]:
+    hint = MARRIAGE_HINT if marriage_enabled else ""
     return [
         qq_avatar_segment(record.target_id),
         text_segment("\n"),
         at_segment(record.target_id),
-        text_segment(f" {record.target_name}是你的今日群友老婆~\n结芬~：输入 @bot /结芬 发起结芬请求"),
+        text_segment(f" {record.target_name}是你的今日群友老婆~{hint}"),
     ]
 
 
-def format_daily_wife_existing(record: DailyWifeRecord) -> list[dict[str, Any]]:
+def format_daily_wife_existing(record: DailyWifeRecord, marriage_enabled: bool = True) -> list[dict[str, Any]]:
+    hint = MARRIAGE_HINT if marriage_enabled else ""
     return [
         text_segment("你已经抽取了今日的群友老婆："),
         at_segment(record.target_id),
-        text_segment(f" {record.target_name}\n结芬~：输入 @bot /结芬 发起结芬请求"),
+        text_segment(f" {record.target_name}{hint}"),
     ]
 
 
 class DailyWifePlugin:
-    def __init__(self) -> None:
+    def __init__(self, settings: dict[str, str] | None = None) -> None:
+        self.marriage_enabled = parse_bool_setting((settings or {}).get("marriage_enabled"), default=True)
         self.daily_wives: dict[tuple[str, str], DailyWifeRecord] = {}
         self.marriage_results: dict[tuple[str, str], MarriageResultRecord] = {}
         self.marriage_proposals_by_requester: dict[tuple[str, str], MarriageProposal] = {}
         self.marriage_proposals_by_target: dict[tuple[str, str], MarriageProposal] = {}
 
     def matches(self, command_name: str, context: CommandContext) -> bool:
-        return command_name in {"/今日群友", "/结芬"} | MARRIAGE_ACCEPT_COMMANDS | MARRIAGE_REJECT_COMMANDS
+        if command_name in DAILY_WIFE_COMMANDS:
+            return True
+        return self.marriage_enabled and command_name in {"/结芬"} | MARRIAGE_ACCEPT_COMMANDS | MARRIAGE_REJECT_COMMANDS
 
     async def handle(self, bot: Any, websocket: Any, event: dict[str, Any], context: CommandContext) -> None:
         command_name = context.text.split(maxsplit=1)[0] if context.text else ""
+        if not self.matches(command_name, context):
+            return
         if command_name == "/结芬":
             await self._handle_marriage_request(bot, websocket, event)
             return
@@ -106,7 +117,7 @@ class DailyWifePlugin:
         cache_key = (group_id, requester_id)
         record = self.daily_wives.get(cache_key)
         if record and record.date_key == date_key:
-            await bot._send_reply(websocket, event, format_daily_wife_existing(record))
+            await bot._send_reply(websocket, event, format_daily_wife_existing(record, self.marriage_enabled))
             return
 
         self._clear_expired_daily_wives(date_key)
@@ -129,7 +140,7 @@ class DailyWifePlugin:
             target_name=member_display_name(target),
         )
         self.daily_wives[cache_key] = record
-        await bot._send_reply(websocket, event, format_daily_wife_new(record))
+        await bot._send_reply(websocket, event, format_daily_wife_new(record, self.marriage_enabled))
 
     def _clear_expired_daily_wives(self, date_key: str) -> None:
         expired_keys = [key for key, record in self.daily_wives.items() if record.date_key != date_key]

@@ -1,0 +1,4 @@
+icalendar==6.3.2
+python-dateutil==2.9.0.post0
+tzdata==2025.2
+Pillow==12.3.0

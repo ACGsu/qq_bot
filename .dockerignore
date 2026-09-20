@@ -1,0 +1,18 @@
+.git/
+.venv/
+venv/
+**/__pycache__/
+**/*.py[cod]
+.env
+.env.*
+plugin_config.json
+downloads/
+*.log
+
+# Timetable database and local backups (private runtime data)
+data/
+backups/
+*.sqlite3*
+
+# Private timetable samples and manual render previews; never ship in the bot
+tmp pillow/

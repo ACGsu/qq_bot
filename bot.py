@@ -17,6 +17,7 @@ from plugins.common import (
     COMMAND_NOT_FOUND_IMAGE_PATH,
     NOT_FOUND_IMAGE_PATH,
     CommandContext,
+    OneBotActionError,
     at_segment,
     command_argument,
     extract_command_after_mention,
@@ -106,6 +107,7 @@ from plugins.summary import (
     message_to_text,
     summarize_group_messages,
 )
+from plugins.timetable import TimetablePlugin
 from plugins.websocket import NativeWebSocketClient, NativeWebSocketConnection, WS_GUID
 
 
@@ -144,6 +146,7 @@ class NapCatBot:
         self._stop = asyncio.Event()
         self._action_waiters: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self.enabled_plugin_ids: tuple[str, ...] = ()
+        self.plugin_settings: dict[str, dict[str, str]] = {}
         self.plugins = self._build_plugins()
 
     def _build_plugins(self) -> list[BotPlugin]:
@@ -155,12 +158,14 @@ class NapCatBot:
             "song": SongPlugin,
             "novel": NovelPlugin,
             "summary": GroupSummaryPlugin,
+            "timetable": TimetablePlugin,
             "basic": BasicCommandPlugin,
         }
         plugin_config = load_plugin_config()
         self.enabled_plugin_ids = plugin_config.enabled_plugin_ids
+        self.plugin_settings = plugin_config.plugin_settings
         enabled_plugin_ids = set(self.enabled_plugin_ids)
-        configured_plugin_ids = {"auto_emoji", "summary"}
+        configured_plugin_ids = {"auto_emoji", "daily_wife", "summary", "timetable"}
         plugins = [
             factories[plugin.plugin_id](plugin_config.plugin_settings.get(plugin.plugin_id, {}))
             if plugin.plugin_id in configured_plugin_ids
@@ -173,6 +178,10 @@ class NapCatBot:
         return plugins
 
     def stop(self) -> None:
+        for plugin in self.plugins:
+            close = getattr(plugin, "close", None)
+            if close:
+                close()
         self._stop.set()
 
     async def run_forever(self) -> None:
@@ -249,12 +258,22 @@ class NapCatBot:
             LOGGER.warning("Ignore non-json message: %r", raw)
             return
 
+        if not isinstance(event, dict):
+            return
+
         echo = event.get("echo")
         if echo:
             waiter = self._action_waiters.pop(str(echo), None)
             if waiter and not waiter.done():
                 waiter.set_result(event)
                 return
+
+        if event.get("post_type") == "notice":
+            for plugin in self.plugins:
+                handle_notice = getattr(plugin, "handle_notice", None)
+                if handle_notice:
+                    await handle_notice(self, websocket, event)
+            return
 
         if event.get("post_type") != "message":
             return
@@ -309,7 +328,10 @@ class NapCatBot:
             },
         )
 
-    async def _send_reply(self, websocket: Any, event: dict[str, Any], message: str | list[dict[str, Any]]) -> None:
+    async def _send_reply(
+        self, websocket: Any, event: dict[str, Any], message: str | list[dict[str, Any]],
+        *, wait_for_response: bool = False, timeout: float = 12,
+    ) -> dict[str, Any] | None:
         message_type = event.get("message_type")
         message_segments = [text_segment(message)] if isinstance(message, str) else message
         params: dict[str, Any] = {
@@ -325,7 +347,15 @@ class NapCatBot:
             LOGGER.warning("Unsupported message_type: %s", message_type)
             return
 
+        if wait_for_response:
+            # Bound both websocket.send() and the acknowledgement wait. Other
+            # plugins keep their existing fire-and-forget behavior by default.
+            return await asyncio.wait_for(
+                self._send_action_request(websocket, "send_msg", params, timeout=timeout),
+                timeout=timeout,
+            )
         await self._send_action(websocket, "send_msg", params)
+        return None
 
     async def _send_action(self, websocket: Any, action: str, params: dict[str, Any]) -> None:
         await websocket.send(
@@ -366,8 +396,11 @@ class NapCatBot:
 
         retcode = response.get("retcode")
         status = response.get("status")
-        if retcode not in (0, None) or status not in ("ok", "async", None):
-            raise RuntimeError(f"OneBot action {action} failed: retcode={retcode}, status={status}")
+        if status == "failed" or (type(retcode) is int and retcode not in (0, 1)):
+            raise OneBotActionError(f"OneBot action {action} was rejected")
+        if not (status == "async" and retcode == 1):
+            if retcode not in (0, None) or status not in ("ok", "async", None):
+                raise RuntimeError(f"OneBot action {action} returned an invalid acknowledgement")
         return response
 
 

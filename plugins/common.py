@@ -92,9 +92,17 @@ def qq_avatar_segment(qq: str) -> dict[str, Any]:
     return {"type": "image", "data": {"file": f"https://q1.qlogo.cn/g?b=qq&nk={qq}&s=640"}}
 
 
-def image_segment_from_file(path: Path) -> dict[str, Any]:
-    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+class OneBotActionError(RuntimeError):
+    """OneBot explicitly rejected an action, unlike an unknown transport outcome."""
+
+
+def image_segment_from_bytes(content: bytes) -> dict[str, Any]:
+    encoded = base64.b64encode(content).decode("ascii")
     return {"type": "image", "data": {"file": f"base64://{encoded}"}}
+
+
+def image_segment_from_file(path: Path) -> dict[str, Any]:
+    return image_segment_from_bytes(path.read_bytes())
 
 
 def today_date_key() -> str:

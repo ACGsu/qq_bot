@@ -22,3 +22,11 @@ downloads/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Timetable database and local backups (private runtime data)
+data/
+backups/
+*.sqlite3*
+
+# Private timetable samples and manual render previews; never ship in the bot
+tmp pillow/
