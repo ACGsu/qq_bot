@@ -663,7 +663,7 @@ class TimetablePluginTest(unittest.IsolatedAsyncioTestCase):
         text = reply_text(self.bot.replies[-1])
         self.assertIn("持久保存", text)
         self.assertIn("解析课表", text)
-        for command in ("/课表", "/导入课表", "/已导入", "/更新课表", "/课ing", "/今日课程", "/取消导入"):
+        for command in ("/课表", "/导入课表", "/已导入", "/更新课表", "/课ing", "/今日课程", "/明日课程", "/取消导入"):
             self.assertIn(command, text)
         self.assertIn("不支持 Excel", text)
 
@@ -1434,6 +1434,23 @@ class TimetablePersistenceWorkflowTest(unittest.IsolatedAsyncioTestCase):
             await self.command("/课ing")
         self.assertEqual(len(self.bot.replies), before)
 
+    async def test_tomorrow_only_sender_and_same_isolation(self):
+        await self.command("/明日课程")
+        self.assertIn("尚未导入", self.latest())
+        await self.import_file()
+        await self.import_file(OTHER_CALENDAR, user_id=222)
+        with patch("plugins.timetable._now", return_value=datetime(2026, 9, 6, 23, 59, tzinfo=SHANGHAI)):
+            await self.command("/明日课程", mentions=["222"])
+        self.assertIn("你的明日课程（2026-09-07", self.latest())
+        self.assertIn("Course A", self.latest())
+        self.assertNotIn("Course B", self.latest())
+        self.assertEqual(self.bot.replies[-1][1][0]["data"]["qq"], "111")
+        await self.command("/明日课程", group_id=200)
+        self.assertIn("尚未导入", self.latest())
+        with patch("plugins.timetable._now", return_value=datetime(2026, 9, 7, 23, 59, tzinfo=SHANGHAI)):
+            await self.command("/明日课程")
+        self.assertIn("明日无课程", self.latest())
+
     async def test_today_only_displays_sender_even_with_another_member_mention(self):
         await self.import_file()
         await self.import_file(OTHER_CALENDAR, user_id=222)
@@ -1456,6 +1473,16 @@ class TimetablePersistenceWorkflowTest(unittest.IsolatedAsyncioTestCase):
             await self.command("/今日课程")
         self.assertIn("今日无课程", self.latest())
         self.assertNotIn("尚未导入", self.latest())
+
+    async def test_tomorrow_cross_midnight_includes_overlap(self):
+        calendar = ("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:night\r\n"
+                    "SUMMARY:Night course\r\nDTSTART;TZID=Asia/Shanghai:20260906T233000\r\n"
+                    "DTEND;TZID=Asia/Shanghai:20260907T003000\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n").encode()
+        await self.import_file(calendar)
+        with patch("plugins.timetable._now", return_value=datetime(2026, 9, 6, 12, tzinfo=SHANGHAI)):
+            await self.command("/明日课程")
+        self.assertIn("你的明日课程（2026-09-07", self.latest())
+        self.assertIn("2026-09-06 23:30–2026-09-07 00:30 Night course", self.latest())
 
     async def test_today_query_cross_midnight_displays_both_dates(self):
         calendar = ("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:night\r\n"
@@ -1534,7 +1561,7 @@ class TimetablePersistenceWorkflowTest(unittest.IsolatedAsyncioTestCase):
         self.parser.assert_awaited_once()
 
     async def test_all_new_commands_are_registered_and_remain_group_only(self):
-        for command in ("/课表", "/导入课表", "/已导入", "/更新课表", "/课ing", "/今日课程", "/取消导入"):
+        for command in ("/课表", "/导入课表", "/已导入", "/更新课表", "/课ing", "/今日课程", "/明日课程", "/取消导入"):
             context = CommandContext(command, [])
             self.assertTrue(self.plugin.matches(command, context))
             self.assertIn(command, dispatch_command("/help", ("timetable",)))
@@ -1614,7 +1641,7 @@ class BotTimetableRoutingTest(unittest.IsolatedAsyncioTestCase):
         websocket = FakeWebSocket()
         await bot._handle_raw_event(websocket, json.dumps(upload_event()))
         self.assertEqual(websocket.sent, [])
-        for command in ("/课表", "/导入课表", "/已导入", "/更新课表", "/课ing", "/今日课程", "/取消导入"):
+        for command in ("/课表", "/导入课表", "/已导入", "/更新课表", "/课ing", "/今日课程", "/明日课程", "/取消导入"):
             await bot._handle_raw_event(websocket, json.dumps(command_event(command)))
             text = websocket.sent[-1]["params"]["message"][0]["data"]["text"]
             self.assertIn("没有该指令", text)

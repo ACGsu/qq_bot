@@ -44,7 +44,7 @@ MAX_REPLY_CHARS = 2800
 MAX_QUERY_MESSAGES = 8
 IMAGE_NOTICE_SECONDS = 3
 MAX_GROUP_MEMBERS = 10_000
-COMMANDS = {"/课表", "/导入课表", "/取消导入", "/已导入", "/更新课表", "/课ing", "/今日课程"}
+COMMANDS = {"/课表", "/导入课表", "/取消导入", "/已导入", "/更新课表", "/课ing", "/今日课程", "/明日课程"}
 IMPORT_GUIDE = "请 @bot /导入课表 → 由本人在本群上传一个 .ics 文件 → @bot /已导入。"
 SAVING_MESSAGE = "课表正在提交数据库，请稍后再操作；提交期间不重复导入，也不能取消或重开会话。"
 SeenKey = TypeVar("SeenKey")
@@ -259,12 +259,13 @@ class TimetablePlugin:
                 "@bot /更新课表：上传新 ICS，再 /已导入，成功后覆盖本人的旧课表\n"
                 "@bot /课ing：按群名片/昵称以图片显示仍在本群的已导入成员当前课程，无课显示无课程\n"
                 "@bot /今日课程：以图片显示发送者自己的今日课表，并 @本人\n"
+                "@bot /明日课程：以图片显示发送者自己的明日课表，并 @本人\n"
                 "@bot /取消导入：清除本次暂存，不删除已入库课表\n"
                 "查询时实时绘图，不保存生成图片；绘图失败时改用文字。\n"
                 "不支持 Excel；查询按北京时间，结果在当前群内可见。\n"
                 "上传会话到期或重启后失效；已入库课表会持久保存。")
             return
-        if command in {"/课ing", "/今日课程"}:
+        if command in {"/课ing", "/今日课程", "/明日课程"}:
             await self._query_courses(bot, websocket, key, command, sender_name=sender_name)
             return
         if command in {"/导入课表", "/更新课表"}:
@@ -478,11 +479,13 @@ class TimetablePlugin:
                 member.courses,
             ) for member in members)
             return TimetableView("current", now, views)
-        courses = await self.store.today_courses(key, now)
+        mode = "tomorrow" if command == "/明日课程" else "today"
+        view = TimetableView(mode, now, ())
+        courses = await self.store.today_courses(key, view.target_day)
         if courses is None:
             await self._reply(bot, websocket, key, "你尚未导入课表。\n" + IMPORT_GUIDE)
             return None
-        return TimetableView("today", now, (MemberView(key[1], sender_name or f"QQ {key[1]}", courses),))
+        return TimetableView(mode, now, (MemberView(key[1], sender_name or f"QQ {key[1]}", courses),))
 
     @staticmethod
     def _query_lines(view: TimetableView) -> list[str]:
@@ -494,11 +497,12 @@ class TimetablePlugin:
                 else:
                     lines.append(f"{member.name}：无课程")
             return lines
-        lines = [f"你的今日课程（{view.now:%Y-%m-%d}，北京时间）"]
+        label = "明日" if view.mode == "tomorrow" else "今日"
+        lines = [f"你的{label}课程（{view.target_day:%Y-%m-%d}，北京时间）"]
         courses = view.members[0].courses
         lines.extend(_course_line(course) for course in courses)
         if not courses:
-            lines.append("今日无课程。")
+            lines.append(f"{label}无课程。")
         return lines
 
     async def _query_courses(

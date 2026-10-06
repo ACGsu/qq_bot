@@ -170,11 +170,11 @@ class BotCommandTest(unittest.TestCase):
 
         self.assertEqual(result.winner_id, "111")
         self.assertEqual(result.loser_id, "222")
-        self.assertIn("禁言5分钟", rendered_text)
+        self.assertIn("禁言1分钟", rendered_text)
         self.assertNotIn("111", rendered_text)
         self.assertNotIn("222", rendered_text)
         self.assertEqual(mentions, ["111", "222", "222"])
-        self.assertEqual(BAN_SECONDS, 300)
+        self.assertEqual(BAN_SECONDS, 60)
 
     def test_daily_wife_candidates_exclude_requester(self) -> None:
         members = [

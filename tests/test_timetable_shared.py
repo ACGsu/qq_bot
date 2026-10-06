@@ -279,6 +279,16 @@ class SharedWorkflowTest(unittest.IsolatedAsyncioTestCase):
         await self.command("/今日课程", group=200, user=333)
         self.assertIn("尚未导入", self.latest())
 
+    async def test_tomorrow_uses_same_qq_in_other_group(self):
+        await self.first_import()
+        with patch("plugins.timetable._now", return_value=NOW - timedelta(days=1)):
+            await self.command("/明日课程", group=200, mentions=("222",))
+        self.assertIn("Course A", self.latest())
+        self.assertIn("你的明日课程", self.latest())
+        event, message = self.bot._send_reply.await_args.args[1:]
+        self.assertEqual(event["group_id"], 200)
+        self.assertEqual(message[0], {"type": "at", "data": {"qq": "111"}})
+
     async def test_current_only_shows_present_members_using_requesting_group_names(self):
         await self.first_import()
         await self.plugin.store.save(("100", "333"), "outsider.ics", "c" * 64, parsed(course("Private outsider course")))

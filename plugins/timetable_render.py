@@ -8,7 +8,7 @@ import re
 import threading
 import unicodedata
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Mapping
 
@@ -58,9 +58,13 @@ class MemberView:
 
 @dataclass(frozen=True)
 class TimetableView:
-    mode: str  # current / today
+    mode: str  # current / today / tomorrow
     now: datetime
     members: tuple[MemberView, ...]
+
+    @property
+    def target_day(self) -> datetime:
+        return self.now.astimezone(SHANGHAI) + timedelta(days=self.mode == "tomorrow")
 
 
 @dataclass(frozen=True)
@@ -213,9 +217,9 @@ def _fonts(paths, scale):
 def build_plan(view: TimetableView, limits: RenderLimits = RenderLimits(),
                font_paths: tuple[str, str] | None = None) -> RenderPlan:
     """Measure the complete response before sending the first page. No raster yet."""
-    if view.mode not in {"current", "today"} or not view.members or view.now.utcoffset() is None:
+    if view.mode not in {"current", "today", "tomorrow"} or not view.members or view.now.utcoffset() is None:
         raise TimetableRenderError("无效的课表展示数据")
-    if view.mode == "today" and len(view.members) != 1:
+    if view.mode in {"today", "tomorrow"} and len(view.members) != 1:
         raise TimetableRenderError("个人课表只能包含本人")
     if sum(max(1, len(m.courses)) for m in view.members) > limits.max_items:
         raise TimetableRenderError("图片课表内容过多")
@@ -229,7 +233,7 @@ def build_plan(view: TimetableView, limits: RenderLimits = RenderLimits(),
     rows = []
     profile = ()
     top = 344
-    if view.mode == "today":
+    if view.mode in {"today", "tomorrow"}:
         profile = fonts.wrap(view.members[0].name, 30, 550, True)
         top = 294 + max(128, len(profile) * 40 + 68) + 40
     for member in view.members:
@@ -375,13 +379,13 @@ def _header(c, plan, avatars):
     current = view.mode == "current"
     c.polygon([(48, 44), (94, 44), (94, 62), (66, 62), (66, 90), (48, 90)], "teal")
     c.text(116, 51, "课表助手", 22, "teal", True)
-    command = "/课ing" if current else "/今日课程"
+    command = "/课ing" if current else "/明日课程" if view.mode == "tomorrow" else "/今日课程"
     c.pill(984 - c.fonts.width(command, 23, True) - 30, 44, command, "gray", "soft", 23, 42)
-    title = "群友在上什么课？" if current else "今日课程"
+    title = "群友在上什么课？" if current else "明日课程" if view.mode == "tomorrow" else "今日课程"
     c.rect((57, 164, 62 + c.fonts.width(title, 52, True), 180), "mint")
     c.text(56, 124, title, 52, bold=True)
     weekdays = "一二三四五六日"
-    c.text(56, 214, f"{view.now:%Y年%m月%d日}  星期{weekdays[view.now.weekday()]}", 24, "soft")
+    c.text(56, 214, f"{view.target_day:%Y年%m月%d日}  星期{weekdays[view.target_day.weekday()]}", 24, "soft")
     c.text(984, 215, f"{view.now:%H:%M:%S} · 查询时刻", 22, "muted", right=True)
     c.line([(56, 264), (984, 264)])
     if current:
@@ -429,21 +433,22 @@ def _current_row(c, row, y, now, avatars):
     c.progress(x, next_y + 20, 952, row.course, now)
 
 
-def _today_row(c, row, y, now):
+def _today_row(c, row, y, now, target_day=None, label="今日"):
+    target_day = target_day or now
     course = row.course
     if not course:
         c.rect((56, y, 984, y + row.height), "gray", 20, "line")
-        c.text(96, y + 45, "今日无课程", 34, "teal", True)
-        c.text(96, y + 104, "今天没有安排课程。", 24, "muted")
+        c.text(96, y + 45, f"{label}无课程", 34, "teal", True)
+        c.text(96, y + 104, f"{label}没有安排课程。", 24, "muted")
         return
     state = course_state(course, now)
     active, ended = state == "current", state == "ended"
     fg = "muted" if ended else "purple_dark" if active else "ink"
     c.text(56, y + 22, clock(course.starts_at), 28, fg, True)
     c.text(56, y + 82, clock(course.ends_at), 25, "muted")
-    if course.starts_at.date() != now.date():
+    if course.starts_at.date() != target_day.date():
         c.text(56, y + 57, f"{course.starts_at:%m-%d} 开始", 17, "muted")
-    if course.ends_at.date() != now.date():
+    if course.ends_at.date() != target_day.date():
         c.text(56, y + 117, f"{course.ends_at:%m-%d} 结束", 17, "muted")
     if active:
         c.ellipse((198, y + 28, 226, y + 56), "purple_line")
@@ -475,14 +480,15 @@ def render_page(plan: RenderPlan, index: int, avatars: Mapping[str, bytes | None
     try:
         _header(c, plan, avatars)
         y = plan.content_top
-        if plan.view.mode == "today" and page.rows[0].course:
+        if plan.view.mode in {"today", "tomorrow"} and page.rows[0].course:
             last_y = y + sum(row.height + 24 for row in page.rows[:-1])
             c.line([(212, y + 42), (212, last_y + 42)], width=2)
         for row in page.rows:
             if plan.view.mode == "current":
                 _current_row(c, row, y, plan.view.now, avatars)
             else:
-                _today_row(c, row, y, plan.view.now)
+                _today_row(c, row, y, plan.view.now, plan.view.target_day,
+                           "明日" if plan.view.mode == "tomorrow" else "今日")
             y += row.height + 24
         footer = page.height - 128
         c.line([(56, footer), (984, footer)])

@@ -117,6 +117,27 @@ class ImageWorkflowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(list(self.directory.iterdir()), [])
         self.assertEqual(self.bot.words, "")
 
+    async def test_tomorrow_image_keeps_real_clock_and_next_day(self):
+        self.clock.return_value = NOW.replace(month=12, day=31)
+        await self.command("/明日课程", mentions=("222",))
+        view = self.last_view()
+        self.assertEqual(view.mode, "tomorrow")
+        self.assertEqual(view.now, self.clock.return_value)
+        self.assertEqual(view.target_day.date().isoformat(), "2027-01-01")
+        self.assertEqual([m.user_id for m in view.members], ["111"])
+        self.bot._get_group_member_list.assert_not_awaited()
+        for call in self.plugin.store.today_courses.await_args_list:
+            self.assertEqual(call.args, (("100", "111"), view.target_day))
+        self.assertTrue(self.raw_image().startswith(b"\x89PNG"))
+        self.assertEqual(self.bot.images[-1][1][0]["data"]["qq"], "111")
+
+    async def test_tomorrow_empty_render_failure_uses_tomorrow_text(self):
+        self.plugin.store.today_courses.return_value = ()
+        self.service.plan.side_effect = TimetableRenderError("test")
+        await self.command("/明日课程")
+        self.assertIn("你的明日课程（2026-09-09", self.bot.words)
+        self.assertIn("明日无课程", self.bot.words)
+
     async def test_today_only_uses_sender_despite_other_mentions(self):
         await self.command("/今日课程", mentions=("222",))
         view = self.last_view()
@@ -200,6 +221,19 @@ class ImageWorkflowTest(unittest.IsolatedAsyncioTestCase):
             await self.command("/今日课程")
         self.assertEqual(self.last_view().now, midnight)
         self.assertEqual(self.last_view().members[0].courses, ())
+
+    async def test_tomorrow_refreshes_target_day_after_midnight(self):
+        self.clock.return_value = NOW.replace(hour=23, minute=59, second=59)
+        midnight = (NOW + timedelta(days=1)).replace(hour=0, minute=0)
+        async def avatars(ids):
+            self.clock.return_value = midnight
+            return {}
+        with patch.object(self.service.avatars, "get_many", side_effect=avatars):
+            await self.command("/明日课程")
+        self.assertEqual(self.last_view().now, midnight)
+        self.assertEqual(self.last_view().target_day.date(), (NOW + timedelta(days=2)).date())
+        self.assertEqual([call.args[1].date() for call in self.plugin.store.today_courses.await_args_list],
+                         [(NOW + timedelta(days=1)).date(), (NOW + timedelta(days=2)).date()])
 
     async def test_missing_font_and_queue_busy_fall_back_to_complete_text(self):
         for error in (TimetableRenderError("private-font"), TimetableImageBusy("busy")):

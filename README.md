@@ -2,7 +2,15 @@
 
 一个通过 NapCat OneBot v11 WebSocket 收发消息的插件式 QQ bot，支持正向连接（bot 作为客户端）和反向连接（bot 作为服务端）。当前 Docker Compose 默认使用反向 WebSocket。
 
-宿主机直接运行需要 Python 3.11 或更新版本，镜像使用 Python 3.11。WebSocket 等核心功能使用标准库；课表解析依赖 `requirements.txt` 中的 `icalendar`、`python-dateutil` 和 `tzdata`；图片课表使用 Pillow 和中文字体，不需要浏览器。歌曲转换额外依赖 FFmpeg。Dockerfile 会安装这些依赖及可再分发的 Noto CJK 字体，构建需要能够访问基础镜像源、Alpine 软件源和 Python 包索引。
+宿主机直接运行需要 Python 3.11 或更新版本，镜像使用 Python 3.11。WebSocket 等核心功能使用标准库；课表解析依赖 `requirements/bot.txt` 中的 `icalendar`、`python-dateutil` 和 `tzdata`；图片课表使用 Pillow 和中文字体，不需要浏览器。歌曲转换额外依赖 FFmpeg。Dockerfile 会安装这些依赖及可再分发的 Noto CJK 字体，构建需要能够访问基础镜像源、Alpine 软件源和 Python 包索引。
+
+## 文档导航与当前状态
+
+- **日常使用**：[使用说明.md](使用说明.md)——从启动 WebUI 到配置插件、保存应用和常见问题。
+- **首次部署与技术参考**：本文包含 Docker／NapCat 连接、环境变量、插件行为和开发测试说明。
+- **依赖与环境要求**：[requirements/README.md](requirements/README.md)——Python、系统依赖、安装方式和配置文件位置。
+
+WebUI 是当前唯一的管理界面入口，运行于宿主机，不依赖 bot 容器启动。用户已于 2026-10-01 确认人工核验完成；旧 Tkinter 入口及其专属测试已清理。验收记录来自用户确认，本轮收尾仅整理文件与文档，不操作容器或发送真实消息。
 
 ## 功能与指令
 
@@ -13,12 +21,12 @@
 | 插件 ID | 指令或触发方式 | 行为 |
 | --- | --- | --- |
 | `basic` | `@bot /help`、`@bot /help 文本`、`@bot /help 分类名`、`@bot /hello` | 群内分层卡片导航、文字帮助；回复 `啦啦啦` |
-| `rps` | `@bot /猜拳 @成员` | 群内随机猜拳，输家禁言 5 分钟，平局不禁言 |
+| `rps` | `@bot /猜拳 @成员` | 群内随机猜拳，输家按配置时长禁言（默认 60 秒），平局不禁言 |
 | `daily_wife` | `@bot /今日群友`（或 `/今日老婆`）、`@bot /结芬`、`@bot /愿意`、`@bot /不愿意` | 群内每日抽取群友，结芬子功能可独立开关 |
 | `courtship` | `@bot /求偶 @成员`、`@bot /接受求偶`、`@bot /拒绝求偶` | 群内求偶及回应 |
 | `song` | `@bot /song 歌曲名`、`@bot /song 序号`、`@bot /song 取消` | 搜索候选、下载所选歌曲并转换为 MP3 文件发送 |
 | `novel` | `@bot /novel 小说名`、`@bot /第3章`、`@bot /第2卷` | 查询轻小说目录及阅读链接 |
-| `timetable` | `@bot /课表`、`@bot /导入课表`、`@bot /已导入`、`@bot /更新课表`、`@bot /课ing`、`@bot /今日课程`、`@bot /取消导入` | 导入或更新本人的 ICS 课表并持久保存；以图片展示本群当前课程或本人今日课表，失败时文字回退；不支持 Excel |
+| `timetable` | `@bot /课表`、`@bot /导入课表`、`@bot /已导入`、`@bot /更新课表`、`@bot /课ing`、`@bot /今日课程`、`@bot /明日课程`、`@bot /取消导入` | 导入或更新本人的 ICS 课表并持久保存；以图片展示本群当前课程或本人今日课表，失败时文字回退；不支持 Excel |
 | `summary` | `@bot /总结`、`@bot /总结 100` | 调用 DeepSeek 总结当前群最近的消息，默认 100 条，最多 500 条 |
 | `auto_emoji` | 指定 QQ 号在群内发言 | 自动贴配置的表情，属于被动监听，**不需要 @bot** |
 
@@ -41,6 +49,7 @@
 │  ├─ /更新课表
 │  ├─ /课ing
 │  ├─ /今日课程
+│  ├─ /明日课程
 │  └─ /取消导入
 └─ 基础指令等其他已启用分类（点击进入）
 ```
@@ -50,7 +59,7 @@
 - `@bot /help 课表`：只查看课表分类的文字帮助。也支持「今日老婆 / 今日群友」「基础 / 基础指令」「歌曲 / 点歌 / 歌曲下载」「小说 / 小说链接」「总结 / 群聊总结」、其他分类标题及插件 ID（例如 `timetable`）。未知或未启用分类会提示当前可用分类。
 - 私聊中的 `/help` 保留文字帮助，不发送群导航卡片；仍遵守真正 `@bot` 的要求。
 - 卡片、分类文字和完整文字列表共用帮助数据：隐藏关闭的插件；关闭 `daily_wife.marriage_enabled` 时，也隐藏结芬及其回应指令。被动的自动贴表情不作为指令分类。
-- 每次请求重新生成卡片，不缓存资源 ID。已有卡片是生成时的快照，不能随配置改变；在控制台保存并应用配置 / 重启 bot 后，请重新发送 `@bot /help` 获取新卡片。
+- 每次请求重新生成卡片，不缓存资源 ID。已有卡片是生成时的快照，不能随配置改变；在 WebUI 保存并应用配置或完成容器重新创建后，请重新发送 `@bot /help` 获取新卡片。
 - 通过现有 OneBot WebSocket 调用 `send_group_forward_msg`，不需要新增 WebUI 凭据、端口或外部链接。所有帮助节点以 bot 自己的 QQ 号生成，不引用群成员的聊天记录或身份。
 - 接口失败、30 秒内没有确认，或回执缺少有效 `message_id` 时，回退一次文字帮助，不重试发送卡片。超时并不证明卡片没有发出，因此偶尔可能同时看到卡片和回退文字；如果客户端无法打开卡片，也可主动使用 `/help 文本`。
 
@@ -59,51 +68,34 @@
 ## 项目结构
 
 ```text
-bot.py                  # 配置读取、连接生命周期、事件分发、OneBot 动作与响应关联
-plugin_control.py       # 插件注册信息、配置加载与保存
-plugin_manager.py       # 宿主机 Tkinter 插件控制台
-plugin_config.json      # 本地插件开关和设置；需自行创建，不纳入 Git
-plugins/
-  common.py             # 指令解析、消息段、头像和中国时区日期等公共工具
-  websocket.py          # 基于标准库实现的 WebSocket 客户端与服务端连接
-  basic.py              # 帮助路由、卡片发送与文字回退，以及 hello
-  help_menu.py          # 共用的分类/指令数据、开关过滤、文字帮助及嵌套导航卡片
-  auto_emoji.py          # 自动贴表情
-  rps.py                 # 猜拳
-  daily_wife.py          # 今日群友与结芬
-  courtship.py           # 求偶
-  song.py                # 歌曲搜索、夸克分享下载、FFmpeg 转换和文件上传
-  novel.py               # 小说目录与章节链接
-  summary.py             # 群历史消息获取及 DeepSeek 总结
-  timetable.py           # 课表接收会话、导入/更新工作流与课程查询指令
-  timetable_files.py     # 群文件事件归一化、限量下载与 ICS 外壳检查
-  timetable_ics.py       # ICS 语义校验、有限重复展开和隔离解析进程
-  timetable_store.py     # SQLite 持久化、事务替换、版本检查及课程查询
-  timetable_render.py    # Pillow 分页布局、状态/进度、内存 PNG 绘制
-  timetable_avatar.py    # QQ 头像安全获取、有界内存缓存和默认头像
-  timetable_images.py    # 有界请求/线程池、绘图超时和关闭清理
-assets/                 # 未找到内容、未知指令的提示图片
-tests/test_bot.py        # 原有功能的标准库 unittest 测试
-tests/test_help_menu.py  # 分层帮助、配置过滤、卡片结构、发送回执/回退、并发与路由测试
-tests/test_timetable.py  # 课表接收、解析、导入/更新/查询、并发与路由测试
-tests/test_timetable_ics.py # 脱敏 ICS、时区、重复/例外规则与解析进程测试
-tests/test_timetable_store.py # 临时 SQLite、持久化、隔离、回滚与时间边界测试
-tests/test_timetable_render.py # 内存图片、分页/长文本、状态及大小限制
-tests/test_timetable_avatar.py # 模拟 HTTPS、头像归一化、缓存/超时/回收
-tests/test_timetable_image_service.py # 请求/线程限额、超时、取消及关闭
-tests/test_timetable_images.py # 图片指令、真实 @、回执、文字降级与数据隔离
-requirements.txt        # 固定版本的 ICS、时区和 Pillow 依赖
-.dockerignore           # 构建时排除本地虚拟环境、Git 和环境变量文件
-Dockerfile              # Python 3.11 Alpine + FFmpeg + Pillow + Noto CJK
-docker-compose.yml     # qq-bot 服务、环境变量、课表数据卷和外部网络
-.env.example            # 环境变量示例
+qq_bot/
+├── bot.py / plugin_control.py       # 机器人入口与共享配置逻辑
+├── run_webui.py / 启动WebUI.cmd      # 本地 WebUI 入口（保持在根目录）
+├── plugins/                         # 自动表情、猜拳、课表等业务插件
+├── webui/                           # 认证、配置、Docker 任务与 API
+│   └── static/                      # 页面、脚本、样式及运行所需背景图
+├── assets/                          # 机器人提示图与 WebUI 背景原图
+├── tests/                           # 正式 Python / JavaScript 回归与隔离预览
+├── README.md / 使用说明.md           # 部署参考与日常使用手册
+├── Dockerfile / docker-compose.yml  # 机器人镜像、服务与数据卷
+├── requirements/                    # 依赖清单与环境要求
+│   ├── bot.txt                      # 机器人运行依赖
+│   ├── webui.txt                    # WebUI 运行依赖
+│   ├── webui-dev.txt                # WebUI 测试依赖（包含 webui.txt）
+│   └── README.md                    # 环境要求与安装命令
+├── .env / .webui.env                # 本机私密配置，自行创建，不纳入 Git
+└── plugin_config.json              # 本机插件配置，不纳入 Git
 ```
+
+依赖清单集中在 `requirements/`，但 `.env`、`.webui.env`、虚拟环境和启动入口仍保留原位置。仅移动清单不需要重新安装依赖或重建现有容器。
+
+本机的 `.venv/`、`.venv-webui/`、`backups/`、运行锁以及所有 `__pycache__/` 均保留，不是本次清理对象。课表数据仍由原持久化目录／Docker 卷管理。旧测试输出日志已清理；`tests/webui_preview.py` 是可复用的隔离预览工具，不是临时垃圾。不要移动根目录的启动入口、Compose 或私密配置，以免相对路径失效。
 
 ## 快速开始：Docker Compose
 
 需要 Docker Engine / Docker Desktop（Linux 容器模式）和 Docker Compose，以及已经运行、登录并启用 OneBot 的 NapCat。**本项目的 Compose 只启动 bot，不包含 NapCat 服务。**
 
-以下 PowerShell 命令均在项目根目录执行。
+以下 PowerShell 命令均在项目根目录执行。本节面向首次真实部署；如果目前只想使用管理页面且不准备启动容器，请先看 [使用说明](使用说明.md)，跳过本节的网络和构建操作。
 
 ### 1. 准备本地配置
 
@@ -111,16 +103,16 @@ docker-compose.yml     # qq-bot 服务、环境变量、课表数据卷和外部
 
 ```powershell
 if (-not (Test-Path -LiteralPath ".env")) {
-    Copy-Item -LiteralPath ".env.example" -Destination ".env"
+    'WEBSOCKET_MODE=server','NAPCAT_ACCESS_TOKEN=','BOT_QQ=' | Set-Content -LiteralPath ".env" -Encoding ascii
 }
 if (-not (Test-Path -LiteralPath "plugin_config.json")) {
-    '{}' | Set-Content -LiteralPath "plugin_config.json" -Encoding ascii
+    '{"enabled_plugins":["auto_emoji","rps","daily_wife","courtship","song","novel","summary","timetable","basic"],"plugin_settings":{}}' | Set-Content -LiteralPath "plugin_config.json" -Encoding ascii
 }
 ```
 
 - 编辑 `.env`，将 `BOT_QQ` 改为真实的机器人 QQ 号，或留空以使用 NapCat 事件中的 `self_id`；不要保留示例号码。
 - 按需填写 `NAPCAT_ACCESS_TOKEN`、自动表情、歌曲下载和 DeepSeek 配置，详见下方配置表。
-- `{}` 是有效的最小插件配置，表示默认启用全部插件、具体设置回退到环境变量。也可以通过插件控制台保存配置生成该文件。
+- 上面的初始配置显式启用当前 9 个插件，兼容机器人和 WebUI；具体设置仍按各插件规则回退。**不要再用 `{}` 初始化**：机器人兼容读取会把它当成默认配置，但 WebUI 为避免静默覆盖，要求已有文件包含字符串数组 `enabled_plugins`。文件不存在时也可以先在 WebUI 检查默认选项，再主动点击“保存配置”创建；只打开页面不会创建配置文件。
 - `plugin_config.json` 被 Git 和 Docker 构建上下文忽略，不会打入新镜像。Compose 会将它作为只读文件挂载，因此**首次启动前必须先创建这个文件**，不能用同名目录代替；已有配置不要重置。
 
 ### 2. 准备 Docker 网络
@@ -152,7 +144,7 @@ ws://my-bot:8080
 ### 4. 构建、启动和查看状态
 
 ```powershell
-docker compose up -d --build
+docker compose up -d --build --force-recreate --no-deps qq-bot
 docker compose ps
 ```
 
@@ -215,7 +207,7 @@ NAPCAT_WS_URL=ws://host.docker.internal:3001
 
 ## 环境变量
 
-完整示例见 `.env.example`。下表列出**当前 Compose 的默认值**，不是所有源码直接运行时的默认值。
+首次部署时在根目录创建 `.env`，按下表填写所需变量（Token、QQ 号和 API Key 使用自己的值，不提交 Git）。下表列出**当前 Compose 的默认值**，不是所有源码直接运行时的默认值。
 
 | 变量 | Compose 默认值 | 说明 |
 | --- | --- | --- |
@@ -261,6 +253,9 @@ NAPCAT_WS_URL=ws://host.docker.internal:3001
       "target_qq": "",
       "emoji_ids": "127852,12951"
     },
+    "rps": {
+      "ban_seconds": "60"
+    },
     "daily_wife": {
       "marriage_enabled": "true"
     },
@@ -276,38 +271,124 @@ NAPCAT_WS_URL=ws://host.docker.internal:3001
 }
 ```
 
-- 从 `enabled_plugins` 中移除对应 ID 即可关闭插件；`[]` 表示全部关闭，包括 `/help`、`/hello`。未知 ID 会被忽略。
+- 从 `enabled_plugins` 中移除对应 ID 即可关闭插件；`[]` 表示全部关闭，包括 `/help`、`/hello`。未知 ID 在机器人运行时被忽略，WebUI 保留原文件中已有的未知项，不允许凭空添加未注册插件。
+- `plugin_settings.rps.ban_seconds` 为 **1～86400 的整数秒字符串**，例如 `"120"`；缺省为 60 秒，不读取另一个猜拳环境变量。机器人侧无效值安全回退并警告，WebUI 则拒绝保存无效值。推荐用页面的秒／分钟输入，无需手工换算或编辑 JSON。
 - `plugin_settings.daily_wife.marriage_enabled` 控制结芬子功能：`"true"` 开启，`"false"` 关闭；未配置时默认开启，兼容旧配置。关闭它不影响每日抽取，但关闭整个 `daily_wife` 插件会同时关闭抽取和结芬。
 - `plugin_settings.timetable.group_isolation_enabled` 控制课表群聊隔离：`"true"`（默认）按群独立，`"false"` 按 QQ 跨群共享。旧配置缺省或无效值仍保持隔离；不会自动开放原有课表。
 - 自动表情和 DeepSeek 的各项设置按“插件配置中的非空值 → 对应环境变量 → 内置默认值”读取。控制台保存的非空设置会覆盖 `.env` 对应项。
-- 文件应保存为 UTF-8（无 BOM）。程序在文件缺失、读取失败、JSON 无效或 `enabled_plugins` 不是列表时，会回退为全部启用；**不要靠删除或破坏配置文件来关闭插件**。
-- 控制台还会写入 `updated_at` 和 `plugins` 元数据；这些字段不用于动态发现或加载新插件。
+- 文件应保存为 UTF-8（无 BOM）。**机器人兼容读取与 WebUI 严格读取不同**：机器人在文件缺失、读取失败、JSON 无效或 `enabled_plugins` 不是列表时，会回退为全部启用；WebUI 只在文件不存在时展示可保存的默认配置，已有文件损坏或字段无效则报错并禁止覆盖。旧文件若只有 `{}`，需先补齐合法的 `enabled_plugins` 列表；不要删除、重置或整份覆盖已有私人设置来排错。
+- 旧控制台写入的 `updated_at` 和 `plugins` 元数据会被 WebUI 保留；这些字段不用于动态发现或加载新插件。
 
-### 图形控制台
+### 独立本地 WebUI（新管理入口）
 
-在有图形桌面的**宿主机**安装带 Tkinter 的 Python 后运行：
+WebUI 使用 FastAPI + Uvicorn，在 **Windows 宿主机**运行，前端无需 Node.js。停止机器人不会关闭管理页面；不要把此服务加入 bot 镜像、挂载 Docker Socket 或开放到公网。
 
-```powershell
-python plugin_manager.py
-```
+#### 安装与启动
 
-控制台可以开关插件、在“今日群友”下独立勾选“启用结芬子功能”、在“课表”下勾选“启用群聊隔离”、设置自动表情目标 QQ / 表情 ID、设置 DeepSeek Key / API 地址 / 模型，并查看 Docker 状态。这两个子开关在各自主插件关闭时置灰，但保留原来的选择；更改后点击“保存并应用”生效。
-
-- **保存配置**：仅写入本地 JSON，不改变已运行的 bot。
-- **保存并应用**：保存后执行 `docker compose up -d --build --force-recreate qq-bot`。
-- **启动/更新**、**停止**、**刷新状态**：调用项目目录下的 Docker Compose，要求宿主机 Docker 命令可用。
-
-Docker 镜像不包含这个 GUI 程序，控制台也不负责编辑 `.env` 中的 WebSocket 或夸克 Cookie 配置。
-
-### 应用配置
-
-插件开关和设置在 bot 启动时加载，**不支持热重载**。修改 `.env` 或 `plugin_config.json` 后，推荐统一执行：
+在项目目录使用 Python 3.11+ 创建独立环境（不修改原有 `.venv`）：
 
 ```powershell
-docker compose up -d --build --force-recreate qq-bot
+if (-not (Test-Path -LiteralPath ".venv-webui\Scripts\python.exe")) {
+    python -m venv .venv-webui
+}
+.\.venv-webui\Scripts\python.exe -m pip install -r requirements/webui.txt
 ```
 
-不要仅依赖 `docker compose restart`：它不会更新容器环境变量，且控制台通过原子替换保存的单文件挂载也可能仍指向旧文件。重新创建容器会清空下述内存会话和每日记录。
+手动创建 UTF-8（无 BOM）编码的 `.webui.env`，按下面的模板填写：
+
+```dotenv
+# 必须自行填写 16～512 字符的独立随机密码；留空将拒绝启动
+WEBUI_PASSWORD=
+WEBUI_PORT=8765
+```
+
+上面的密码值特意留空，没有默认密码；必须自行填写且不能全为空白。**不要使用机器人 API Key 或 NapCat Token 作为登录密码**；私密文件已被 Git 和 Docker 构建上下文排除。服务不会自动创建该文件，也不会读写认证历史或生成备份。
+
+完成依赖安装和密码设置后，可直接双击项目根目录的 [启动WebUI.cmd](启动WebUI.cmd)。脚本复用 `.venv-webui`，不会启动 Docker 或自动安装依赖；出错时保留窗口提示。可通过资源管理器“发送到 → 桌面快捷方式”创建桌面入口，不要移动脚本本身。详细密码设置见 [使用说明](使用说明.md)。
+
+统一启动入口（也可手动运行）：
+
+```powershell
+.\.venv-webui\Scripts\python.exe run_webui.py
+```
+
+浏览器打开 [http://127.0.0.1:8765](http://127.0.0.1:8765)，输入自己设置的管理员密码。默认仅监听 `127.0.0.1`；可配置端口，暂不支持远程绑定。会话 1 小时到期，HttpOnly + SameSite=Strict，注销立即失效；每分钟最多 5 次登录尝试。使用本地 HTTP，因此 Cookie 不设置 Secure；未来远程访问必须另行设计 HTTPS，不能直接暴露当前服务。Host、来源和 CSRF 均校验，不支持代理转发。
+
+注意：`WEBUI_PASSWORD`／`WEBUI_PORT` 的同名**进程环境变量优先于 `.webui.env`**。修改该文件后要结束并重启 WebUI 才生效，已有会话失效；这不需要重建机器人容器。端口范围 1024～65535，改端口后使用新的访问地址。启动入口默认只输出警告，终端保持运行且没有报错时可直接打开页面，不必等待“启动成功”文字。仅关闭浏览器不会停止服务；服务终端中 Ctrl+C 才会退出，容器任务执行中请勿关闭。
+
+#### 页面和设置
+
+- **概览**：Docker 可用性、可验证的容器状态、启用插件数、最多 20 项内存任务记录。**容器运行不代表 QQ 已连接**。
+- **插件管理**：9 个插件、搜索、状态筛选、单独和批量开关、侧边设置面板。主插件关闭后控件置灰，子功能和原有配置保持不变。
+- **猜拳**：秒／分钟输入，保存 `plugin_settings.rps.ban_seconds` 字符串，范围 1～86400 整数秒。缺省 60 秒。运行时无效值安全回退并警告；WebUI 拒绝无效配置。机器人仍需群管理权限。
+- **自动贴表情**：直接输入或粘贴 😀、😂、👍、❤️、🔥、🍬、㊗️ 等单码点 Unicode 表情，解析后预览、去重、删除；不限于快捷按钮，内部继续保存兼容的十进制 `emoji_ids`。仅转换符合 Emoji 属性且不会与 QQ 短 ID 混淆的字符，不承诺所有字符或 QQ 专属表情均可用。肤色、旗帜、ZWJ 等组合按完整字素簇拒绝，不拆成错误回应。无法反向映射的旧 ID 显示「旧版表情（保留）」，其他设置修改不会丢弃它。继承环境时只作预览，不主动写入 JSON；实际 NapCat 版本接受情况须授权群验收。
+- **今日群友／课表**：分别配置结芬子功能和群聊隔离；关闭隔离会提示跨群共享的隐私影响。
+- **群聊总结**：配置 DeepSeek Key、API 地址和模型。Key 不从配置 API 回传；留空保留，勾选才清除 **JSON 中的 Key**。若 `.env` 仍有 Key，清除后会继续继承，WebUI 不修改 `.env`。自定义 API 地址会接收 Key，请只使用信任的服务。
+- **日志**：认证后请求最近 200 行，并按输出上限截取展示；支持搜索、暂停自动刷新与滚动，日志量和长行有上限，凭据脱敏。群消息中的个人信息仍需人工检查后再转发。
+
+#### 保存、应用和 Docker 操作
+
+| 操作 | 实际行为 |
+| --- | --- |
+| 校验配置 | 校验草稿，不写文件、不操作容器 |
+| 保存配置 | 版本冲突检查，同目录临时文件原子替换 JSON，无备份，不操作容器 |
+| 保存并应用 | 保存后 `docker compose up -d --force-recreate --no-build --no-deps qq-bot` |
+| 启动机器人 | `docker compose up -d --no-build --no-deps qq-bot`，没有镜像时提示先构建 |
+| 停止机器人 | 仅 `docker compose stop qq-bot`，不删除卷和网络 |
+| 重新构建并启动 | `docker compose up -d --build --force-recreate --no-deps qq-bot` |
+
+命令固定项目目录与 Compose 文件，同时只允许一个保存／容器任务。容器任务后台执行并返回 ID、阶段和结果；普通操作限时 120 秒，构建 900 秒，状态／日志／验证 20 秒。超时会结束命令树，但 Docker daemon 可能已经执行部分操作，所以不声称回滚，需刷新实际状态。任务记录仅保存在服务进程内，重启后清空。
+
+应用和构建会验证 **新运行容器 ID** 与容器 `BOT_PLUGIN_CONFIG` 文件的 SHA-256 摘要，不只依据命令退出码。无法验证则显示失败／未知；外部替换容器、改变配置或 Docker 不可用会使验证状态失效。此验证不保证 QQ 连接、群禁言或消息回应成功。保存成功而应用失败时，JSON 仍已保存，应排障后重新应用。
+
+初次部署猜拳新增运行代码必须构建镜像；之后仅调整配置，使用保存并应用，无需构建。不要用 `docker compose restart` 替代重新创建：单文件原子替换挂载可能仍指向旧文件，环境变量也不会随简单重启更新。重新创建会丢失部分内存会话和每日记录，但不删除持久化课表。
+
+配置损坏或不可读时，WebUI 明确报错，不把它显示为「全部启用」并覆盖；需在保留原设置的前提下手动修复原文件。并发保存返回 409，重新加载后再编辑。不要同时在多个页面或外部程序中写配置，外部程序不参加 WebUI 文件锁。
+
+#### 隔离测试与迁移状态
+
+```powershell
+.\.venv-webui\Scripts\python.exe -m pip install -r requirements/webui-dev.txt -r requirements/bot.txt
+.\.venv-webui\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+如已安装 Node.js，可额外执行纯 JavaScript 回归（无需 npm 安装；WebUI 运行本身不需要 Node.js）：
+
+```powershell
+node tests/test_webui_duration.mjs
+node tests/test_webui_frontend.mjs
+```
+
+这两项分别覆盖全部 1～86400 秒的单位往返、十进制校验，以及最小 DOM 模拟下的页面状态／操作锁／Esc 确认，不替代浏览器视觉验收。
+
+WebUI 测试仅使用临时 JSON、临时锁文件和模拟 Docker，不操作真实容器、私人配置或课表卷。可运行 `.\.venv-webui\Scripts\python.exe tests/webui_preview.py` 启动 **18765 端口的隔离页面**；它使用临时数据与测试密码 `test-only-password-123456`，所有 Docker 调用均模拟，绝不能当作正式管理入口。
+
+用户已于 2026-10-01 确认最终人工核验完成。后续版本仍需按变更范围核验界面、配置应用和真实消息；当前结果不代表所有 QQ／NapCat 版本均兼容。旧 GUI 已移除，正式入口统一为 `run_webui.py` 或 `启动WebUI.cmd`。离线回归不等于真实 QQ 在线；Docker 不可用时仍可登录和编辑配置。
+
+#### 常见问题入口
+
+- 页面打不开：确认 WebUI 终端未退出、依赖已安装、密码及端口有效；只改端口时重启 WebUI，不重建 bot。
+- Docker 不可用：仍可使用页面与配置功能；等准备好后再启动 Docker Desktop，不用为了查看页面先启动容器。
+- “配置损坏”：检查 `enabled_plugins` 是否为字符串数组、设置值是否符合格式；旧 `{}` 不通过 WebUI 校验。不要把文件删掉来消除提示。
+- 409 冲突／已有任务：等待当前操作结束；若为版本冲突，确认是否丢弃当前草稿后重新加载，不盲目重试或删除锁文件。
+- Key 显示“已设置”但输入框为空：正常的秘密保护行为；留空会保留，清除 JSON 后仍可能继承 `.env`。
+- 403／会话问题：使用配置端口的本机直接地址，不走代理；重新登录，不关闭 Host／来源／CSRF 防护。
+
+更多诊断及离线／正式入口区分见 [使用说明](使用说明.md)。
+
+### 应用配置（命令行）
+
+插件开关和设置在 bot 启动时加载，不支持热重载。代码／依赖变更时：
+
+```powershell
+docker compose up -d --build --force-recreate --no-deps qq-bot
+```
+
+仅配置变更且镜像已有时：
+
+```powershell
+docker compose up -d --force-recreate --no-build --no-deps qq-bot
+```
 
 ## 功能说明
 
@@ -329,6 +410,7 @@ docker compose up -d --build --force-recreate qq-bot
 - `@bot /取消导入`：清除本次上传或更新的暂存，终止正在进行的解析，**不删除已入库课表**。在开始提交数据库前可取消或重开；数据库提交期间会明确提示“正在提交数据库”，暂不允许取消、重开或重复提交。已开始的事务会原子完成，不因上传会话此时到期而中断。
 - `@bot /课ing`：以图片卡片列出**当前仍在本群且已导入课表的成员**，优先显示群名片，其次 QQ 昵称；均为空时显示 `QQ 号码`，同名成员附 QQ 号区分，不逐个 @打扰。显示正在进行的课程名、开始/结束时间及可选地点；重叠课程全部显示，无课成员显示“无课程”。不显示不在当前群的成员；隔离关闭时，允许查询本群成员在其他群导入的课表。当前成员均无可用课表时给出导入指引。发送者自己未导入，也可以使用此群内查询。
 - `@bot /今日课程`：真实 @命令发送者，以个人时间轴图片显示他本人的今日课表，按时间排序；隔离开启时用本群记录，关闭时用跨群共享记录。额外 @他人不会改变查询对象。未导入时提醒导入；已导入但今天无课时回复“今日无课程”。
+- `@bot /明日课程`：以图片展示发送者自己明天的课表，并 @本人；按北京时间确定明天，其余权限、群聊隔离/共享、跨日课程筛选和文字回退条件与 `/今日课程` 相同。
 - `@bot /课表`：查看以上操作说明。
 
 时间与输出规则：
@@ -342,7 +424,7 @@ docker compose up -d --build --force-recreate qq-bot
 
 #### 可选的群聊隔离
 
-在宿主机重新打开图形控制台，在“课表”下设置 **“启用群聊隔离”**，再点击 **“保存并应用”**。仅“保存配置”不会改变正在运行的 bot；`/课表` 和 `/help 课表` 会显示当前已生效的模式。
+在宿主机打开 WebUI，在“课表”下设置 **“启用群聊隔离”**，再点击 **“保存并应用”**。仅“保存配置”不会改变正在运行的 bot；`/课表` 和 `/help 课表` 会显示当前已生效的模式。
 
 - **勾选（默认）**：沿用原有行为，同一 QQ 在各群分别导入、查询和更新。旧配置没有此选项时仍默认隔离。
 - **取消勾选**：同一 QQ 只需在一个群完成正式导入，就能在其他群使用 `/今日课程`，也能出现在那些群的 `/课ing` 中，无需重复导入。`/更新课表` 可在任意群发起；再次 `/导入课表` 会提示已有课表并引导更新。
@@ -395,7 +477,7 @@ Pillow 展示本身只改变绘图与发送流程，**不修改数据库结构�
 
 #### 课表在线备份（Docker / PowerShell）
 
-建议在升级前备份。下面使用 SQLite `backup()` 生成包含已提交 WAL 数据的一致性快照，再复制到宿主机的 `backups/`；不会停止 bot、改写正式课表或读取群文件。每次生成不同文件名，并拒绝覆盖同名快照。
+本节是原有课表功能的**可选手工运维参考**，不属于本次 WebUI 安装或验收流程；本次不执行备份，也未新增自动备份功能，现有备份保留。若以后另行决定执行手工备份，下面使用 SQLite `backup()` 生成包含已提交 WAL 数据的一致性快照，再复制到宿主机的 `backups/`；不会停止 bot、改写正式课表或读取群文件。每次生成不同文件名，并拒绝覆盖同名快照。
 
 在项目目录运行：
 
@@ -455,6 +537,8 @@ if ($LASTEXITCODE -ne 0) { throw "Copy failed; the checked snapshot is still in 
 
 启用 `auto_emoji` 并设置目标 QQ 后，bot 会在能接收到该成员发言的各群中，对其带 `message_id` 的消息依次调用 NapCat 的 `set_msg_emoji_like`。不处理私聊，也不需要指令或 @。
 
+日常使用推荐在 WebUI 中直接粘贴 😀、😂、👍、❤️、🔥、🍬、㊗️ 等表情，点击“解析并添加”，不需要查询编码。支持单码点 Unicode Emoji（允许末尾的 emoji 样式选择符），不再限定两种表情；是否被当前 QQ／NapCat 实际接受仍需人工验收。以下 ID 说明用于理解旧配置和环境变量，不是页面输入要求。
+
 表情 ID 支持用英文/中文逗号、分号或空白分隔，并自动去重。新配置建议使用 `AUTO_EMOJI_IDS` 或插件设置中的 `emoji_ids`；插件设置同时兼容旧的 `emoji_id` 字段。能否成功贴表情取决于 NapCat 接口和具体表情 ID 的支持情况。
 
 ### 群聊总结
@@ -471,7 +555,9 @@ bot 会整理成员显示名和消息的文本表示、过滤总结指令，将�
 
 需配置有效的 `DEEPSEEK_API_KEY` 或插件设置中的 `deepseek_api_key`；未配置或接口失败时会提示错误，不提供离线总结兜底。**调用会将群聊内容发送到配置的 API 服务，并可能产生费用**，启用前应确认群成员知情及服务使用规则。当前没有单独的调用者权限校验或频率限制。
 
-### 猜拳权限
+### 猜拳时长与权限
+
+在 WebUI“猜拳 → 配置插件”中设置输家禁言时长，默认 60 秒，可填秒或分钟，换算后必须为 1～86400 整数秒。点击完成后仍需“保存配置”或“保存并应用”；关闭主插件会保留时长。首次部署新增猜拳代码需要构建镜像，后续只改时长无需构建。
 
 `/猜拳` 仅限群聊，不能和自己猜拳。禁言通过 OneBot 的 `set_group_ban` 实现，需要 bot 拥有相应群管理权限，且目标不是 bot 无权禁言的成员。发送了猜拳结果不代表 NapCat 的禁言动作一定成功。
 
@@ -481,7 +567,7 @@ bot 会整理成员显示名和消息的文本表示、过滤总结指令，将�
 
 同一成员在同一群内每天只能抽取一次；再次查询会返回当天已抽到的成员。日期按中国时区（UTC+8）判断，次日可重新抽取，记录仅保存在内存中。
 
-结芬是 `daily_wife` 的可选子功能，默认开启。可以在图形控制台“今日群友”下取消勾选“启用结芬子功能”，再点击“保存并应用”。关闭后仍可抽取或查询今日群友，但抽取结果和 `/help` 不再显示结芬提示，`/结芬` 以及 `/愿意`、`/不愿意` 等回应指令不再由此插件处理；求偶插件不受影响。
+结芬是 `daily_wife` 的可选子功能，默认开启。可以在 WebUI“今日群友”下取消勾选“启用结芬子功能”，再点击“保存并应用”。关闭后仍可抽取或查询今日群友，但抽取结果和 `/help` 不再显示结芬提示，`/结芬` 以及 `/愿意`、`/不愿意` 等回应指令不再由此插件处理；求偶插件不受影响。
 
 开启时，抽取后输入 `@bot /结芬`，对方需在 2 分钟内回复 `@bot /愿意` 或 `@bot /不愿意`。不愿意或超时回复 `雑魚~雑魚~，被甩了捏~`；愿意回复 `正在制作结婚证（其实是生图ai没钱弄）`，**目前不会实际生成结婚证图片**。同一成员在同一群内每天只能发起一次结芬，完成后重复请求返回当次结果。
 
@@ -524,7 +610,7 @@ bot 会整理成员显示名和消息的文本表示、过滤总结指令，将�
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements/bot.txt
 ```
 
 直接运行 bot 时，程序**不会自动读取 `.env`**，需先将配置导出为进程环境变量。例如仅监听本机的反向 WebSocket：
@@ -538,13 +624,13 @@ $env:LISTEN_PORT = "8080"
 
 在此示例中，本机 NapCat 可连接 `ws://127.0.0.1:8080`；跨容器或跨机器连接需调整监听地址。若没有设置任何环境变量，源码默认是 `client` 模式，连接 `ws://napcat:3001`，与 Compose 默认值不同。需要歌曲下载时，宿主机还须安装 FFmpeg 并将其加入 `PATH`。
 
-安装上述依赖和中文字体后，运行测试无需 NapCat、API Key 或第三方测试框架：
+全量回归还包含独立 WebUI，请先按上文“隔离测试与迁移状态”安装 `.venv-webui` 中的测试依赖。安装依赖和中文字体后，运行测试无需 NapCat、API Key 或第三方测试框架：
 
 ```powershell
-.\.venv\Scripts\python.exe -B -m unittest discover -s tests -v
+.\.venv-webui\Scripts\python.exe -B -m unittest discover -s tests -v
 ```
 
-测试使用模拟接口及本机回环 HTTP 服务，覆盖配置读写、指令解析、自动表情、群聊总结、结芬/求偶、歌曲/小说解析、分层帮助及卡片发送/超时回退，以及课表文件接收、双事件去重、格式和大小拒绝、ICS 时区/重复/改期/排除规则、解析限额和进程终止、会话隔离、过期、取消、并发、SQLite 持久化与更新回滚、课程查询时间边界、当前成员过滤与昵称刷新、成员接口失败的安全处理、SQLite 在线备份及 WebSocket 动作响应等逻辑，不访问真实群聊或外部 API，也不代替真实 NapCat、外部网站、DeepSeek 和 FFmpeg 的联调。ICS 自动化测试使用脱敏合成数据和临时数据库，不读取个人下载目录中的原始样本，也不会写入运行中的正式课表库。图片测试还覆盖内存 PNG/Base64、绘图布局/分页/大小限额、14:30/15:55 与跨午夜更新、头像异常及缓存淘汰、线程真实结束前不释放限额、取消/关闭后不迟发、图片回执确认与不盲重发、数据库更新后立即使用新内容。头像 HTTPS 完全模拟，不下载真实 QQ 头像。群聊隔离测试覆盖默认开关、GUI 保存/置灰、按 QQ 跨群查询、历史多份选择、共享更新/并发冲突、恢复隔离和当前群成员过滤。
+测试使用模拟接口及本机回环 HTTP 服务，覆盖配置读写、指令解析、自动表情、群聊总结、结芬/求偶、歌曲/小说解析、分层帮助及卡片发送/超时回退，以及课表文件接收、双事件去重、格式和大小拒绝、ICS 时区/重复/改期/排除规则、解析限额和进程终止、会话隔离、过期、取消、并发、SQLite 持久化与更新回滚、课程查询时间边界、当前成员过滤与昵称刷新、成员接口失败的安全处理、SQLite 在线备份及 WebSocket 动作响应等逻辑，不访问真实群聊或外部 API，也不代替真实 NapCat、外部网站、DeepSeek 和 FFmpeg 的联调。ICS 自动化测试使用脱敏合成数据和临时数据库，不读取个人下载目录中的原始样本，也不会写入运行中的正式课表库。图片测试还覆盖内存 PNG/Base64、绘图布局/分页/大小限额、14:30/15:55 与跨午夜更新、头像异常及缓存淘汰、线程真实结束前不释放限额、取消/关闭后不迟发、图片回执确认与不盲重发、数据库更新后立即使用新内容。头像 HTTPS 完全模拟，不下载真实 QQ 头像。群聊隔离测试覆盖默认开关、WebUI 配置保存与禁用状态、按 QQ 跨群查询、历史多份选择、共享更新/并发冲突、恢复隔离和当前群成员过滤。
 
 添加新插件时，需要在 `plugin_control.py` 注册定义、在 `bot.py` 的工厂映射中注册实现，并按需补充 `plugins/help_menu.py` 的帮助指令、分类标题/别名和测试；卡片与文字共用这些数据。仅放入 `plugins/` 目录不会被自动发现。插件的可选 `handle_event()` 只接收消息事件，`handle_notice()` 接收通知事件；需要清理暂存或定时器时可实现同步 `close()`，bot 停止时会调用。
 

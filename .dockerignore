@@ -16,3 +16,16 @@ backups/
 
 # Private timetable samples and manual render previews; never ship in the bot
 tmp pillow/
+
+# Host-only WebUI; never ship admin credentials or dependencies
+.webui.env*
+.webui*.lock
+.webui-*.tmp
+.venv-webui/
+webui/
+run_webui.py
+requirements/webui*.txt
+requirements/README.md
+tests/
+docs/
+启动WebUI.cmd

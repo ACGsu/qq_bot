@@ -75,7 +75,7 @@ class TimetableRenderTest(unittest.TestCase):
         self.assertEqual(course_progress(course(), course().ends_at - timedelta(seconds=1))[2], "不足 1 分钟")
 
     def test_today_empty_and_current_idle_have_valid_pages(self):
-        for mode in ("today", "current"):
+        for mode in ("today", "tomorrow", "current"):
             plan = build_plan(view(mode, ()))
             self.assertIsNone(plan.pages[0].rows[0].course)
             self.assertTrue(render_page(plan, 0).startswith(b"\x89PNG"))

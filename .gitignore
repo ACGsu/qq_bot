@@ -30,3 +30,10 @@ backups/
 
 # Private timetable samples and manual render previews; never ship in the bot
 tmp pillow/
+
+# Independent host WebUI secrets and runtime
+.webui.env
+.webui-*.lock
+.webui.lock
+.webui-*.tmp
+.venv-webui/

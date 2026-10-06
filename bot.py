@@ -165,7 +165,7 @@ class NapCatBot:
         self.enabled_plugin_ids = plugin_config.enabled_plugin_ids
         self.plugin_settings = plugin_config.plugin_settings
         enabled_plugin_ids = set(self.enabled_plugin_ids)
-        configured_plugin_ids = {"auto_emoji", "daily_wife", "summary", "timetable"}
+        configured_plugin_ids = {"auto_emoji", "daily_wife", "summary", "timetable", "rps"}
         plugins = [
             factories[plugin.plugin_id](plugin_config.plugin_settings.get(plugin.plugin_id, {}))
             if plugin.plugin_id in configured_plugin_ids

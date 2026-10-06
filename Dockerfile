@@ -26,8 +26,8 @@ RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
     done \
     && [ "$installed" -eq 1 ]
 
-COPY requirements.txt .
-RUN python -m pip install --no-cache-dir --disable-pip-version-check -r requirements.txt
+COPY requirements/bot.txt ./requirements/bot.txt
+RUN python -m pip install --no-cache-dir --disable-pip-version-check -r requirements/bot.txt
 
 COPY bot.py .
 COPY plugin_control.py .

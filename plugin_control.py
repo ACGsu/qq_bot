@@ -30,7 +30,7 @@ PLUGIN_DEFINITIONS: tuple[PluginDefinition, ...] = (
     PluginDefinition(
         "rps",
         "猜拳",
-        "发起群成员猜拳，输家禁言 5 分钟。",
+        "发起群成员猜拳，输家按配置时长禁言。",
         ("/猜拳 @成员",),
     ),
     PluginDefinition(
@@ -175,3 +175,64 @@ def save_plugin_config(
 def save_enabled_plugin_ids(enabled_plugin_ids: Iterable[str], config_path: Path | None = None) -> Path:
     existing_settings = load_plugin_config(config_path).plugin_settings
     return save_plugin_config(enabled_plugin_ids, existing_settings, config_path)
+
+
+def validate_ban_seconds(value: object) -> int:
+    """Strict management boundary; runtime callers may explicitly fall back."""
+    import re
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9]+", value) or len(value) > 5:
+        raise ValueError("猜拳禁言时长必须为 1～86400 的整数秒")
+    seconds = int(value)
+    if not 1 <= seconds <= 86400:
+        raise ValueError("猜拳禁言时长必须为 1～86400 的整数秒")
+    return seconds
+
+
+def load_plugin_payload_strict(path: Path) -> tuple[dict, str]:
+    """Read without the bot's tolerant fallback. Never expose file contents in errors."""
+    import hashlib
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return {"enabled_plugins": list(PLUGIN_ORDER), "plugin_settings": {}}, "missing"
+    except OSError:
+        raise ValueError("配置读取失败，请检查文件权限") from None
+    try:
+        payload = json.loads(raw)
+        if not isinstance(payload, dict):
+            raise ValueError()
+        enabled = payload.get("enabled_plugins")
+        settings = payload.get("plugin_settings", {})
+        if not isinstance(enabled, list) or any(not isinstance(x, str) for x in enabled):
+            raise ValueError()
+        if not isinstance(settings, dict) or any(not isinstance(v, dict) for v in settings.values()):
+            raise ValueError()
+        for plugin_id, values in settings.items():
+            for key, value in values.items():
+                legacy_boolean = (plugin_id, key) in {
+                    ("daily_wife", "marriage_enabled"), ("timetable", "group_isolation_enabled")}
+                if not isinstance(value, str) and not (legacy_boolean and isinstance(value, bool)):
+                    raise ValueError()
+        if "ban_seconds" in settings.get("rps", {}):
+            validate_ban_seconds(settings["rps"]["ban_seconds"])
+    except (ValueError, UnicodeError, TypeError):
+        raise ValueError("配置损坏或字段格式无效，请先修复；未覆盖原文件") from None
+    return payload, hashlib.sha256(raw).hexdigest()
+
+
+def atomic_write_plugin_payload(path: Path, payload: dict) -> None:
+    """Same-directory atomic replacement; no backup or historical copy."""
+    import tempfile
+    temp = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                         prefix=".webui-", suffix=".tmp", delete=False) as stream:
+            temp = Path(stream.name)
+            json.dump(payload, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp, path)
+    finally:
+        if temp is not None:
+            temp.unlink(missing_ok=True)
