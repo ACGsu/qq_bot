@@ -4,24 +4,48 @@ import json
 import logging
 import os
 import re
-import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib import error, request
-from urllib.parse import quote_plus, urlencode, urlsplit
+from urllib.parse import quote_plus, urlsplit
 from uuid import uuid4
 
-from .common import CommandContext, NOT_FOUND_IMAGE_PATH, at_segment, command_argument, image_segment_from_file, text_segment
+from .common import (
+    CommandContext,
+    NOT_FOUND_IMAGE_PATH,
+    at_segment,
+    command_argument,
+    image_segment_from_bytes,
+    image_segment_from_file,
+    text_segment,
+)
 
 
 LOGGER = logging.getLogger("qq-bot")
-XIAGEBA_BASE_URL = os.getenv("XIAGEBA_BASE_URL", "https://xiageba.liumingye.cn").rstrip("/")
+GD_MUSIC_API_URL = os.getenv("GD_MUSIC_API_URL", "https://music-api.gdstudio.xyz/api.php").rstrip("/")
+GD_MUSIC_SITE_URL = os.getenv("GD_MUSIC_SITE_URL", "https://music.gdstudio.xyz").rstrip("/")
+SONG_MUSIC_SOURCE = os.getenv("SONG_MUSIC_SOURCE", "netease")
+SONG_BITRATE = os.getenv("SONG_BITRATE", "320")
+SONG_QUALITY_CHOICES = ("192", "320", "740", "999")
+# 选 740/999（无损档）时，上游实际返回码率视为“符合该档”的下限
+SONG_QUALITY_FLOOR_BPS = {"192": 192, "320": 320, "740": 740, "999": 740}
+SONG_COVER_SIZE = os.getenv("SONG_COVER_SIZE", "300")
+SONG_COVER_MAX_BYTES = 5 * 1024 * 1024
 SONG_DOWNLOAD_DIR = Path(__file__).resolve().parents[1] / "downloads"
 SONG_MAX_DOWNLOAD_BYTES = int(os.getenv("SONG_MAX_DOWNLOAD_MB", "80")) * 1024 * 1024
 SONG_SEARCH_LIMIT = 10
 SONG_SESSION_SECONDS = int(os.getenv("SONG_SESSION_MINUTES", "10")) * 60
+AUDIO_EXTENSIONS = (".mp3", ".flac", ".m4a", ".aac", ".wav", ".ogg")
+
+
+class SongApiError(RuntimeError):
+    """GD 音乐台接口无法提供可用资源（频率限制、HTTP 错误等）。"""
+
+
+class SongUnavailableError(SongApiError):
+    """接口未返回可用下载链接（无版权、已下架、音质档位缺失）。"""
 
 
 @dataclass(frozen=True)
@@ -30,24 +54,15 @@ class SongResult:
     title: str
     artist: str
     album: str
-    cover_url: str
+    pic_id: str = ""
+    source: str = SONG_MUSIC_SOURCE
 
 
 @dataclass(frozen=True)
 class SongDownload:
-    quality: str
     url: str
-
-
-@dataclass(frozen=True)
-class SongDetails:
-    song_id: str
-    title: str
-    artist: str
-    album: str
-    cover_url: str
-    play_url: str
-    downloads: tuple[SongDownload, ...]
+    size_mb: float | None = None
+    bitrate: int = 0
 
 
 @dataclass(frozen=True)
@@ -56,37 +71,46 @@ class SongSearchSession:
     created_at: float
 
 
-class QuarkDownloadError(RuntimeError):
-    pass
-
-
 def fetch_json(url: str, timeout: float = 30) -> Any:
     req = request.Request(
         url,
         headers={
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
             "Accept": "application/json",
-            "Referer": f"{XIAGEBA_BASE_URL}/",
+            "Referer": f"{GD_MUSIC_SITE_URL}/",
         },
     )
-    with request.urlopen(req, timeout=timeout) as response:
-        return json.loads(response.read().decode("utf-8", "replace"))
+    try:
+        with request.urlopen(req, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8", "replace"))
+    except error.HTTPError as exc:
+        if exc.code == 429:
+            raise SongApiError("请求过于频繁，请稍后再试。") from exc
+        raise SongApiError(f"音乐接口请求失败（HTTP {exc.code}）") from exc
+
+
+def join_song_artists(raw_artist: Any) -> str:
+    if isinstance(raw_artist, (list, tuple)):
+        artists = [str(item).strip() for item in raw_artist if str(item).strip()]
+        return "、".join(artists) or "未知歌手"
+    return str(raw_artist or "").strip() or "未知歌手"
 
 
 def parse_song_search_response(payload: Any) -> list[SongResult]:
-    if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
-        raise ValueError("Invalid Xiageba search response")
+    if not isinstance(payload, list):
+        raise ValueError("Invalid GD music search response")
     songs = []
-    for item in payload["data"]:
-        if not isinstance(item, dict) or not item.get("id") or not item.get("title"):
+    for item in payload:
+        if not isinstance(item, dict) or not item.get("id") or not item.get("name"):
             continue
         songs.append(
             SongResult(
                 song_id=str(item["id"]),
-                title=str(item["title"]).strip(),
-                artist=str(item.get("artist") or "未知歌手").strip(),
+                title=str(item["name"]).strip(),
+                artist=join_song_artists(item.get("artist")),
                 album=str(item.get("album") or "").strip(),
-                cover_url=str(item.get("cover") or "").strip(),
+                pic_id=str(item.get("pic_id") or "").strip(),
+                source=str(item.get("source") or SONG_MUSIC_SOURCE).strip(),
             )
         )
     return songs
@@ -94,39 +118,114 @@ def parse_song_search_response(payload: Any) -> list[SongResult]:
 
 def search_songs(name: str, limit: int = SONG_SEARCH_LIMIT) -> list[SongResult]:
     query = quote_plus(name)
-    payload = fetch_json(f"{XIAGEBA_BASE_URL}/api/music/search?q={query}&page=1&pageSize={limit}")
+    payload = fetch_json(
+        f"{GD_MUSIC_API_URL}?types=search&source={SONG_MUSIC_SOURCE}&name={query}&count={limit}&pages=1"
+    )
     return parse_song_search_response(payload)[:limit]
 
 
-def parse_song_details_response(payload: Any) -> SongDetails:
-    if not isinstance(payload, dict) or not payload.get("id") or not payload.get("title"):
-        raise ValueError("Invalid Xiageba song details response")
-    raw_downloads = payload.get("downloads") or []
-    if isinstance(raw_downloads, dict):
-        raw_downloads = [raw_downloads]
-    downloads = tuple(
-        SongDownload(str(item.get("quality") or "未知音质"), str(item.get("url") or ""))
-        for item in raw_downloads
-        if isinstance(item, dict) and item.get("url")
+def parse_song_size_mb(raw_size: Any) -> float | None:
+    """API 文档称 size 单位为 KB，但实测为字节；小于 5e6 的值按 KB 理解。"""
+    try:
+        size = float(raw_size)
+    except (TypeError, ValueError):
+        return None
+    if size <= 0:
+        return None
+    if size <= 5_000_000:
+        size *= 1024
+    return round(size / (1024 * 1024), 1)
+
+
+def fetch_song_url(track_id: str, bitrate: str = SONG_BITRATE, source: str = SONG_MUSIC_SOURCE) -> SongDownload:
+    payload = fetch_json(
+        f"{GD_MUSIC_API_URL}?types=url&source={source}&id={quote_plus(track_id)}&br={bitrate}"
     )
-    return SongDetails(
-        song_id=str(payload["id"]),
-        title=str(payload["title"]).strip(),
-        artist=str(payload.get("artist") or "未知歌手").strip(),
-        album=str(payload.get("album") or "").strip(),
-        cover_url=str(payload.get("cover") or "").strip(),
-        play_url=str(payload.get("playUrl") or "").strip(),
-        downloads=downloads,
-    )
+    if not isinstance(payload, dict):
+        raise SongUnavailableError("音乐接口返回异常")
+    try:
+        bitrate_value = int(payload.get("br"))
+    except (TypeError, ValueError):
+        bitrate_value = -1
+    url = str(payload.get("url") or "").strip()
+    if not url or bitrate_value == -1:
+        raise SongUnavailableError("该歌曲暂时无法获取下载链接，可能无版权或已下架。")
+    return SongDownload(url, parse_song_size_mb(payload.get("size")), max(bitrate_value, 0))
 
 
-def fetch_song_details(song_id: str) -> SongDetails:
-    return parse_song_details_response(fetch_json(f"{XIAGEBA_BASE_URL}/api/music/{quote_plus(song_id)}"))
+def song_quality_floor(quality: str) -> int:
+    floor = SONG_QUALITY_FLOOR_BPS.get(quality)
+    if floor is not None:
+        return floor
+    try:
+        return max(int(quality), 0)
+    except ValueError:
+        return 0
 
 
-def parse_song_selection(argument: str) -> int | None:
-    match = re.fullmatch(r"(?:选择\s*)?(\d+)", argument.strip())
-    return int(match.group(1)) if match else None
+def fetch_song_download(song: SongResult, quality: str = SONG_BITRATE) -> SongDownload:
+    """按指定音质获取直链；当前音源不支持该音质时抛出可直接回复用户的提示。"""
+    try:
+        download = fetch_song_url(song.song_id, bitrate=quality, source=song.source)
+    except SongUnavailableError:
+        if quality == "320":
+            raise
+        # 用 320 档探针区分「歌曲不可用」与「仅不支持所选音质」
+        try:
+            fetch_song_url(song.song_id, bitrate="320", source=song.source)
+        except SongApiError:
+            raise SongUnavailableError("该歌曲暂时无法获取下载链接，可能无版权或已下架。") from None
+        raise SongApiError(f"当前音源不支持所选音质（{quality}kbps），请降低音质后重试。") from None
+    floor = song_quality_floor(quality)
+    if floor and download.bitrate and download.bitrate < floor:
+        raise SongApiError(
+            f"当前音源不支持所选音质（{quality}kbps，实际仅支持 {download.bitrate}kbps），请降低音质后重试。"
+        )
+    return download
+
+
+def fetch_song_cover(pic_id: str, source: str = SONG_MUSIC_SOURCE) -> bytes | None:
+    """获取专辑封面图片字节；任何失败都返回 None，不阻断主流程。"""
+    if not pic_id:
+        return None
+    try:
+        payload = fetch_json(
+            f"{GD_MUSIC_API_URL}?types=pic&source={source}&id={quote_plus(pic_id)}&size={SONG_COVER_SIZE}"
+        )
+        if not isinstance(payload, dict):
+            return None
+        cover_url = str(payload.get("url") or "").strip()
+        if not cover_url:
+            return None
+        req = request.Request(
+            cover_url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+                "Referer": f"{GD_MUSIC_SITE_URL}/",
+            },
+        )
+        with request.urlopen(req, timeout=30) as response:
+            content_type = response.headers.get("Content-Type", "").lower()
+            if content_type and not content_type.startswith("image/"):
+                return None
+            content_length = int(response.headers.get("Content-Length", "0") or 0)
+            if content_length > SONG_COVER_MAX_BYTES:
+                return None
+            data = response.read(SONG_COVER_MAX_BYTES + 1)
+        if len(data) > SONG_COVER_MAX_BYTES:
+            return None
+        return data
+    except Exception:
+        LOGGER.warning("Failed to fetch song cover for pic_id=%s", pic_id, exc_info=True)
+        return None
+
+
+def parse_song_selection(argument: str) -> tuple[int, str | None] | None:
+    """解析 `2`、`选择 3`、`2+320`、`选择 2+999`，返回 (序号, 音质|None)。"""
+    match = re.fullmatch(r"(?:选择\s*)?(\d+)\s*(?:\+?\s*(\d+))?", argument.strip())
+    if not match:
+        return None
+    return int(match.group(1)), match.group(2)
 
 
 def format_song_search_results(results: list[SongResult]) -> str:
@@ -134,60 +233,64 @@ def format_song_search_results(results: list[SongResult]) -> str:
     for index, song in enumerate(results, 1):
         album = f"，专辑：{song.album}" if song.album else ""
         lines.append(f"{index}. {song.title} - {song.artist}{album}")
-    lines.append("请回复：@bot /song 序号（例如：@bot /song 2）")
+    lines.append("请回复：@bot /song 序号（例如：@bot /song 2），亦可回复 @bot /song 序号+音质（如 2+320）")
     return "\n".join(lines)
 
 
-def is_share_page_url(url: str) -> bool:
-    host = (urlsplit(url).hostname or "").lower()
-    return host in {"pan.quark.cn", "pan.baidu.com", "www.aliyundrive.com", "www.alipan.com"}
+def song_quality_label(bitrate: int) -> str:
+    if bitrate <= 0:
+        return "未知音质"
+    label = f"{bitrate}kbps"
+    if bitrate >= 740:
+        label += "（无损）"
+    return label
 
 
-def is_quark_share_url(url: str) -> bool:
-    return (urlsplit(url).hostname or "").lower() == "pan.quark.cn"
-
-
-def choose_song_source(song: SongDetails, allow_quark: bool = False) -> SongDownload | None:
-    direct_downloads = [download for download in song.downloads if not is_share_page_url(download.url)]
-    mp3_downloads = [download for download in direct_downloads if "mp3" in download.quality.lower()]
-    if mp3_downloads:
-        return mp3_downloads[0]
-    if allow_quark:
-        quark_mp3 = [
-            download
-            for download in song.downloads
-            if is_quark_share_url(download.url) and "mp3" in download.quality.lower()
-        ]
-        if quark_mp3:
-            return quark_mp3[0]
-    if song.play_url and not is_share_page_url(song.play_url):
-        return SongDownload("播放音频", song.play_url)
-    if direct_downloads:
-        return direct_downloads[0]
-    if allow_quark:
-        return next((download for download in song.downloads if is_quark_share_url(download.url)), None)
-    return None
-
-
-def format_song_details(song: SongDetails) -> str:
+def format_song_details(song: SongResult, download: SongDownload) -> str:
     album = song.album or "未知"
-    qualities = "、".join(download.quality for download in song.downloads) or "未知"
-    return f"歌曲：{song.title}\n歌手：{song.artist}\n专辑：{album}\n可用音质：{qualities}"
+    size = f"（约 {download.size_mb:.1f} MB）" if download.size_mb else ""
+    return f"歌曲：{song.title}\n歌手：{song.artist}\n专辑：{album}\n音质：{song_quality_label(download.bitrate)}{size}"
+
+
+def detect_song_extension(path: Path, url: str = "") -> str:
+    """按文件头魔术字节识别音频格式，退化时按 URL 后缀，最终兜底 .mp3。"""
+    header = b""
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(12)
+    except OSError:
+        header = b""
+    if header.startswith(b"fLaC"):
+        return ".flac"
+    if header.startswith(b"ID3") or (len(header) >= 2 and header[0] == 0xFF and (header[1] & 0xE0) == 0xE0):
+        return ".mp3"
+    if header.startswith(b"OggS"):
+        return ".ogg"
+    if header.startswith(b"RIFF"):
+        return ".wav"
+    if len(header) >= 8 and header[4:8] == b"ftyp":
+        return ".m4a"
+    suffix = Path(urlsplit(url).path).suffix.lower()
+    return suffix if suffix in AUDIO_EXTENSIONS else ".mp3"
+
+
+def safe_song_filename(title: str, extension: str = ".mp3") -> str:
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", title).strip(" ._")
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    suffix = extension if extension.startswith(".") else f".{extension}"
+    return f"{(cleaned or 'song')[:80]}{suffix}"
 
 
 def download_song_source(
     url: str,
     output_path: Path,
     max_bytes: int = SONG_MAX_DOWNLOAD_BYTES,
-    cookie: str | None = None,
 ) -> None:
     """Stream a remote song to disk while enforcing a size limit."""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
-        "Referer": f"{XIAGEBA_BASE_URL}/",
+        "Referer": f"{GD_MUSIC_SITE_URL}/",
     }
-    if cookie:
-        headers["Cookie"] = cookie
     req = request.Request(url, headers=headers)
     total = 0
     with request.urlopen(req, timeout=60) as response, output_path.open("wb") as output:
@@ -204,208 +307,6 @@ def download_song_source(
             output.write(chunk)
 
 
-QUARK_API_BASE_URL = "https://drive-pc.quark.cn/1/clouddrive"
-QUARK_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "Chrome/146.0.0.0 Safari/537.36 QuarkPC/7.0.0"
-)
-
-
-def quark_api_request(
-    cookie: str,
-    path: str,
-    method: str = "GET",
-    params: dict[str, Any] | None = None,
-    payload: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    query = {"pr": "ucpro", "fr": "pc", **(params or {})}
-    url = f"{QUARK_API_BASE_URL}/{path.lstrip('/')}?{urlencode(query)}"
-    data = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
-    req = request.Request(
-        url,
-        data=data,
-        method=method,
-        headers={
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "Cookie": cookie,
-            "User-Agent": QUARK_USER_AGENT,
-        },
-    )
-    try:
-        with request.urlopen(req, timeout=30) as response:
-            result = json.loads(response.read().decode("utf-8", "replace"))
-    except error.HTTPError as exc:
-        raise QuarkDownloadError(f"夸克接口请求失败（HTTP {exc.code}）") from exc
-    if not isinstance(result, dict) or result.get("status") != 200:
-        code = result.get("code", "unknown") if isinstance(result, dict) else "invalid"
-        message = result.get("message", "接口返回异常") if isinstance(result, dict) else "接口返回异常"
-        raise QuarkDownloadError(f"夸克接口失败（{code}）：{message}")
-    return result
-
-
-def quark_share_id(share_url: str) -> str:
-    match = re.search(r"https?://pan\.quark\.cn/s/([A-Za-z0-9]+)", share_url)
-    if not match:
-        raise QuarkDownloadError("无法解析夸克分享链接")
-    return match.group(1)
-
-
-def quark_share_files(cookie: str, pwd_id: str, stoken: str, pdir_fid: str = "0") -> list[dict[str, Any]]:
-    result = quark_api_request(
-        cookie,
-        "share/sharepage/detail",
-        params={
-            "pwd_id": pwd_id,
-            "stoken": stoken,
-            "pdir_fid": pdir_fid,
-            "force": 0,
-            "_page": 1,
-            "_size": 100,
-            "_fetch_total": 1,
-            "_sort": "file_type:asc,file_name:asc",
-        },
-    )
-    items = result.get("data", {}).get("list", [])
-    return [item for item in items if isinstance(item, dict)]
-
-
-def choose_quark_audio_file(items: list[dict[str, Any]]) -> dict[str, Any] | None:
-    files = [item for item in items if not item.get("dir")]
-    audio_extensions = (".mp3", ".flac", ".aac", ".m4a", ".wav", ".ogg")
-    mp3_files = [item for item in files if str(item.get("file_name", "")).lower().endswith(".mp3")]
-    if mp3_files:
-        return mp3_files[0]
-    return next(
-        (item for item in files if str(item.get("file_name", "")).lower().endswith(audio_extensions)),
-        None,
-    )
-
-
-def wait_for_quark_task(cookie: str, task_id: str, timeout: int = 60) -> dict[str, Any]:
-    deadline = time.time() + timeout
-    retry_index = 0
-    while time.time() < deadline:
-        result = quark_api_request(cookie, "task", params={"task_id": task_id, "retry_index": retry_index})
-        task_data = result.get("data", {})
-        if task_data.get("status") == 2:
-            return task_data
-        if task_data.get("status") == 3:
-            raise QuarkDownloadError("夸克临时转存任务失败")
-        retry_index += 1
-        time.sleep(1)
-    raise QuarkDownloadError("夸克临时转存任务超时")
-
-
-def download_quark_share_source(
-    share_url: str,
-    cookie: str,
-    output_path: Path,
-    max_bytes: int = SONG_MAX_DOWNLOAD_BYTES,
-) -> None:
-    pwd_id = quark_share_id(share_url)
-    folder_fid: str | None = None
-    try:
-        token_result = quark_api_request(
-            cookie,
-            "share/sharepage/token",
-            method="POST",
-            payload={"pwd_id": pwd_id, "passcode": "", "support_visit_limit_private_share": True},
-        )
-        stoken = str(token_result.get("data", {}).get("stoken") or "")
-        if not stoken:
-            raise QuarkDownloadError("夸克分享令牌为空，分享可能已失效")
-
-        shared_file = choose_quark_audio_file(quark_share_files(cookie, pwd_id, stoken))
-        if not shared_file:
-            raise QuarkDownloadError("夸克分享中没有可下载的音频文件")
-
-        folder_result = quark_api_request(
-            cookie,
-            "file",
-            method="POST",
-            payload={"file_name": f"qqbot-song-{uuid4().hex}", "pdir_fid": "0", "dir_init_lock": False},
-        )
-        folder_fid = str(folder_result.get("data", {}).get("fid") or "")
-        if not folder_fid:
-            raise QuarkDownloadError("无法创建夸克临时目录")
-
-        fid = str(shared_file.get("fid") or "")
-        fid_token = str(shared_file.get("share_fid_token") or shared_file.get("fid_token") or "")
-        save_result = quark_api_request(
-            cookie,
-            "share/sharepage/save",
-            method="POST",
-            payload={
-                "fid_list": [fid],
-                "fid_token_list": [fid_token] if fid_token else [],
-                "to_pdir_fid": folder_fid,
-                "pwd_id": pwd_id,
-                "stoken": stoken,
-                "pdir_fid": "0",
-                "pdir_save_all": False,
-                "exclude_fids": [],
-                "scene": "link",
-            },
-        )
-        task_id = str(save_result.get("data", {}).get("task_id") or "")
-        if task_id:
-            wait_for_quark_task(cookie, task_id)
-
-        stored_result = quark_api_request(
-            cookie,
-            "file/sort",
-            params={"pdir_fid": folder_fid, "_page": 1, "_size": 20, "_fetch_total": 1},
-        )
-        stored_items = stored_result.get("data", {}).get("list", [])
-        stored_file = choose_quark_audio_file([item for item in stored_items if isinstance(item, dict)])
-        if not stored_file:
-            raise QuarkDownloadError("夸克临时目录中没有找到转存后的音频")
-
-        download_result = quark_api_request(
-            cookie,
-            "file/download",
-            method="POST",
-            payload={"fids": [str(stored_file.get("fid"))]},
-        )
-        download_items = download_result.get("data", [])
-        if isinstance(download_items, dict):
-            download_items = [download_items]
-        download_url = str(download_items[0].get("download_url") or "") if download_items else ""
-        if not download_url:
-            raise QuarkDownloadError("夸克没有返回文件下载地址")
-        download_song_source(download_url, output_path, max_bytes=max_bytes, cookie=cookie)
-    finally:
-        if folder_fid:
-            try:
-                quark_api_request(
-                    cookie,
-                    "file/delete",
-                    method="POST",
-                    payload={"filelist": [folder_fid], "action_type": 2, "exclude_fids": []},
-                )
-            except Exception:
-                LOGGER.warning("Failed to clean temporary Quark folder")
-
-
-def convert_song_to_mp3(source_path: Path, output_path: Path) -> None:
-    result = subprocess.run(
-        ["ffmpeg", "-nostdin", "-y", "-i", str(source_path), "-vn", "-codec:a", "libmp3lame", "-q:a", "2", str(output_path)],
-        capture_output=True,
-        timeout=180,
-        check=False,
-    )
-    if result.returncode != 0 or not output_path.exists() or output_path.stat().st_size == 0:
-        error_text = result.stderr.decode("utf-8", errors="replace")[-1000:]
-        raise RuntimeError(f"ffmpeg failed: {error_text}")
-
-
-def safe_song_filename(title: str) -> str:
-    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", title).strip(" ._")
-    cleaned = re.sub(r"\s+", " ", cleaned)
-    return f"{(cleaned or 'song')[:80]}.mp3"
-
-
 class SongPlugin:
     def __init__(self) -> None:
         self.song_sessions: dict[str, SongSearchSession] = {}
@@ -416,7 +317,13 @@ class SongPlugin:
     async def handle(self, bot: Any, websocket: Any, event: dict[str, Any], context: CommandContext) -> None:
         argument = command_argument(context.text)
         if not argument:
-            await bot._send_reply(websocket, event, "用法：@bot /song 歌曲名称；搜索后使用 @bot /song 序号 选择歌曲。")
+            await bot._send_reply(
+                websocket,
+                event,
+                "用法：@bot /song 歌曲名称；搜索后使用 @bot /song 序号（如 @bot /song 2）"
+                "或 @bot /song 序号+音质（如 @bot /song 2+320，音质可选 "
+                f"{'/'.join(SONG_QUALITY_CHOICES)}）下载。",
+            )
             return
 
         session_key = self._song_session_key(event)
@@ -425,13 +332,24 @@ class SongPlugin:
             await bot._send_reply(websocket, event, "已取消本次歌曲选择。")
             return
 
-        selection = parse_song_selection(argument)
-        if selection is not None:
-            await self._handle_song_selection(bot, websocket, event, session_key, selection)
+        selection_info = parse_song_selection(argument)
+        if selection_info is not None:
+            selection, quality = selection_info
+            if quality is not None and quality not in SONG_QUALITY_CHOICES:
+                await bot._send_reply(
+                    websocket,
+                    event,
+                    f"音质可选 {' / '.join(SONG_QUALITY_CHOICES)}，请重新输入，例如：@bot /song 2+320",
+                )
+                return
+            await self._handle_song_selection(bot, websocket, event, session_key, selection, quality or SONG_BITRATE)
             return
 
         try:
             songs = await asyncio.to_thread(search_songs, argument)
+        except SongApiError as exc:
+            await bot._send_reply(websocket, event, str(exc))
+            return
         except Exception:
             LOGGER.exception("Song search failed")
             await self._send_song_not_found(bot, websocket, event)
@@ -456,6 +374,7 @@ class SongPlugin:
         event: dict[str, Any],
         session_key: str,
         selection: int,
+        quality: str,
     ) -> None:
         session = self.song_sessions.get(session_key)
         if not session or time.time() - session.created_at > SONG_SESSION_SECONDS:
@@ -469,36 +388,35 @@ class SongPlugin:
         selected = session.results[selection - 1]
         self.song_sessions.pop(session_key, None)
         try:
-            song = await asyncio.to_thread(fetch_song_details, selected.song_id)
+            download, cover_bytes = await asyncio.gather(
+                asyncio.to_thread(fetch_song_download, selected, quality),
+                asyncio.to_thread(fetch_song_cover, selected.pic_id, selected.source),
+            )
+        except SongApiError as exc:
+            LOGGER.warning("Song API rejected selection: %s", exc)
+            await bot._send_reply(websocket, event, str(exc))
+            return
         except Exception:
-            LOGGER.exception("Song details request failed")
-            await bot._send_reply(websocket, event, "歌曲详情获取失败，请稍后重新搜索。")
+            LOGGER.exception("Song download request failed")
+            await bot._send_reply(websocket, event, "歌曲信息获取失败，请稍后重新搜索。")
             return
 
         user_id = str(event.get("user_id"))
         message: list[dict[str, Any]] = []
         if event.get("message_type") == "group":
             message.extend((at_segment(user_id), text_segment(" ")))
-        message.append(text_segment(format_song_details(song)))
+        message.append(text_segment(format_song_details(selected, download)))
+        if cover_bytes:
+            message.append(image_segment_from_bytes(cover_bytes))
         await bot._send_reply(websocket, event, message)
 
-        source = choose_song_source(song, allow_quark=bool(bot.config.quark_cookie))
-        if not source:
-            links = "\n".join(f"{download.quality}：{download.url}" for download in song.downloads)
-            if any(is_quark_share_url(download.url) for download in song.downloads):
-                explanation = "该站当前仅提供夸克分享页，但 bot 尚未配置 QUARK_COOKIE。"
-            else:
-                explanation = "该站当前仅提供暂不支持自动下载的网盘分享页。"
-            await bot._send_reply(websocket, event, f"{explanation}\n{links}" if links else explanation)
-            return
-
-        await bot._send_reply(websocket, event, f"正在下载并转换为 MP3：{source.quality}")
-        file_path = await self._download_song_file(bot, source.url)
+        await bot._send_reply(websocket, event, f"正在下载源文件：{song_quality_label(download.bitrate)}")
+        file_path = await self._download_song_file(bot, download.url)
         if not file_path:
-            await bot._send_reply(websocket, event, "歌曲转换或下载失败，请稍后再试。")
+            await bot._send_reply(websocket, event, "歌曲下载失败，请稍后再试。")
             return
         try:
-            await self._send_song_file(bot, websocket, event, file_path, f"{song.title} - {song.artist}")
+            await self._send_song_file(bot, websocket, event, file_path, f"{selected.title} - {selected.artist}")
         finally:
             file_path.unlink(missing_ok=True)
 
@@ -510,19 +428,17 @@ class SongPlugin:
         SONG_DOWNLOAD_DIR.mkdir(exist_ok=True)
         identifier = uuid4().hex
         source_path = SONG_DOWNLOAD_DIR / f"{identifier}.source"
-        output_path = SONG_DOWNLOAD_DIR / f"{identifier}.mp3"
+        output_path: Path | None = None
         try:
-            if is_quark_share_url(audio_url):
-                if not bot.config.quark_cookie:
-                    raise QuarkDownloadError("QUARK_COOKIE 未配置")
-                await asyncio.to_thread(download_quark_share_source, audio_url, bot.config.quark_cookie, source_path)
-            else:
-                await asyncio.to_thread(download_song_source, audio_url, source_path)
-            await asyncio.to_thread(convert_song_to_mp3, source_path, output_path)
+            await asyncio.to_thread(download_song_source, audio_url, source_path)
+            extension = detect_song_extension(source_path, audio_url)
+            output_path = SONG_DOWNLOAD_DIR / f"{identifier}{extension}"
+            source_path.rename(output_path)
             return output_path
         except Exception:
-            LOGGER.exception("Failed to download or convert song file")
-            output_path.unlink(missing_ok=True)
+            LOGGER.exception("Failed to download song file")
+            if output_path is not None:
+                output_path.unlink(missing_ok=True)
             return None
         finally:
             source_path.unlink(missing_ok=True)
@@ -531,7 +447,7 @@ class SongPlugin:
         encoded = base64.b64encode(file_path.read_bytes()).decode("ascii")
         params: dict[str, Any] = {
             "file": f"base64://{encoded}",
-            "name": safe_song_filename(title),
+            "name": safe_song_filename(title, file_path.suffix or ".mp3"),
         }
         if event.get("message_type") == "group":
             params["group_id"] = int(event["group_id"])

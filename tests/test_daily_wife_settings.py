@@ -50,7 +50,7 @@ def group_event(command, user_id=111, target_id=None):
 
 
 def make_bot():
-    return NapCatBot(BotConfig("server", "ws://example.invalid", None, "999", "127.0.0.1", 8080, 5.0, None))
+    return NapCatBot(BotConfig("server", "ws://example.invalid", None, "999", "127.0.0.1", 8080, 5.0))
 
 
 class DailyWifeSettingsTest(unittest.TestCase):

@@ -240,7 +240,7 @@ class HelpRoutingTest(unittest.IsolatedAsyncioTestCase):
         self.enterContext(patch.dict(os.environ, {"TIMETABLE_DB_PATH": str(Path(temp_dir) / "timetable.sqlite3")}))
 
     def make_bot(self, enabled=("daily_wife", "timetable", "basic"), settings=None, bot_qq="999"):
-        config = BotConfig("server", "ws://example.invalid", None, bot_qq, "127.0.0.1", 8080, 5.0, None)
+        config = BotConfig("server", "ws://example.invalid", None, bot_qq, "127.0.0.1", 8080, 5.0)
         with patch("bot.load_plugin_config", return_value=PluginConfig(enabled, settings or {})):
             bot = NapCatBot(config)
         self.addCleanup(bot.stop)

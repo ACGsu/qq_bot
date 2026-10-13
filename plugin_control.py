@@ -48,8 +48,8 @@ PLUGIN_DEFINITIONS: tuple[PluginDefinition, ...] = (
     PluginDefinition(
         "song",
         "歌曲下载",
-        "搜索歌曲、选择候选并下载转换为 MP3 发送。",
-        ("/song 歌曲名", "/song 序号"),
+        "搜索歌曲、选择候选并按指定音质下载源文件发送。",
+        ("/song 歌曲名", "/song 序号", "/song 序号+音质"),
     ),
     PluginDefinition(
         "novel",

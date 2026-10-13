@@ -18,7 +18,7 @@ if not exist "run_webui.py" (
 )
 if not exist ".webui.env" if not defined WEBUI_PASSWORD (
     echo [ERROR] WebUI password is not configured.
-    echo Create .webui.env in this directory and set WEBUI_PASSWORD (see README.md).
+    echo Create .webui.env in this directory and set WEBUI_PASSWORD ^(see README.md^).
     echo Use your own random password with 16-512 characters.
     goto :failed
 )

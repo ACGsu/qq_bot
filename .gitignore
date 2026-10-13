@@ -37,3 +37,11 @@ tmp pillow/
 .webui.lock
 .webui-*.tmp
 .venv-webui/
+
+# Local tooling workspace data; never publish
+.workbuddy-ai/
+
+# Local scratch and planning notes; never publish
+_e2e/
+song功能修改计划-GDStudio.md
+to linux.md

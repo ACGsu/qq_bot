@@ -19,7 +19,6 @@
 | Python | 3.11 或更新版本；机器人镜像使用 Python 3.11 |
 | Docker Desktop / Docker Engine + Compose v2 | 通过容器部署机器人、使用 WebUI 容器管理功能时需要；仅启动 WebUI 和编辑配置不需要运行 Docker |
 | NapCat / OneBot v11 | 真实 QQ 消息功能需要，连接配置见根目录 README |
-| FFmpeg | 歌曲音频转换需要；Dockerfile 已安装，宿主机直接运行机器人时需自行安装并加入 PATH |
 | 中文字体 | 图片课表需要；镜像安装 Noto CJK，宿主机运行的字体说明见根目录 README |
 | Node.js | 仅运行 `.mjs` 前端回归时需要，支持 ES modules 和 `node:` 内置模块；日常使用不需要，也无需 npm 安装 |
 | 浏览器 | 支持现代 JavaScript 的浏览器，如当前版本 Edge / Chrome |
@@ -50,7 +49,7 @@ if (-not (Test-Path -LiteralPath ".venv\Scripts\python.exe")) {
 .\.venv\Scripts\python.exe -m pip install -r requirements/bot.txt
 ```
 
-这只是依赖安装步骤。宿主机启动时的环境变量加载、FFmpeg 与字体配置见 [README](../README.md)。
+这只是依赖安装步骤。宿主机启动时的环境变量加载与字体配置见 [README](../README.md)。
 
 ### 开发与全项目回归（可选）
 

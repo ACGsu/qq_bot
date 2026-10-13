@@ -69,37 +69,36 @@ from plugins.rps import (
     play_rock_paper_scissors,
 )
 from plugins.song import (
+    GD_MUSIC_API_URL,
+    GD_MUSIC_SITE_URL,
+    SONG_BITRATE,
     SONG_DOWNLOAD_DIR,
     SONG_MAX_DOWNLOAD_BYTES,
+    SONG_MUSIC_SOURCE,
+    SONG_QUALITY_CHOICES,
     SONG_SEARCH_LIMIT,
     SONG_SESSION_SECONDS,
-    XIAGEBA_BASE_URL,
-    QuarkDownloadError,
-    SongDetails,
+    SongApiError,
     SongDownload,
     SongPlugin,
     SongResult,
     SongSearchSession,
-    choose_quark_audio_file,
-    choose_song_source,
-    convert_song_to_mp3,
-    download_quark_share_source,
+    SongUnavailableError,
+    detect_song_extension,
     download_song_source,
     fetch_json,
-    fetch_song_details,
+    fetch_song_cover,
+    fetch_song_download,
+    fetch_song_url,
     format_song_details,
     format_song_search_results,
-    is_quark_share_url,
-    is_share_page_url,
-    parse_song_details_response,
+    join_song_artists,
     parse_song_search_response,
     parse_song_selection,
-    quark_api_request,
-    quark_share_files,
-    quark_share_id,
+    parse_song_size_mb,
     safe_song_filename,
     search_songs,
-    wait_for_quark_task,
+    song_quality_label,
 )
 from plugins.summary import (
     GroupSummaryPlugin,
@@ -123,7 +122,6 @@ class BotConfig:
     listen_host: str
     listen_port: int
     reconnect_seconds: float
-    quark_cookie: str | None
 
     @classmethod
     def from_env(cls) -> "BotConfig":
@@ -135,7 +133,6 @@ class BotConfig:
             listen_host=os.getenv("LISTEN_HOST", "0.0.0.0"),
             listen_port=int(os.getenv("LISTEN_PORT", "8080")),
             reconnect_seconds=float(os.getenv("RECONNECT_SECONDS", "5")),
-            quark_cookie=os.getenv("QUARK_COOKIE") or None,
         )
 
 

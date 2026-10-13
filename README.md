@@ -2,7 +2,7 @@
 
 一个通过 NapCat OneBot v11 WebSocket 收发消息的插件式 QQ bot，支持正向连接（bot 作为客户端）和反向连接（bot 作为服务端）。当前 Docker Compose 默认使用反向 WebSocket。
 
-宿主机直接运行需要 Python 3.11 或更新版本，镜像使用 Python 3.11。WebSocket 等核心功能使用标准库；课表解析依赖 `requirements/bot.txt` 中的 `icalendar`、`python-dateutil` 和 `tzdata`；图片课表使用 Pillow 和中文字体，不需要浏览器。歌曲转换额外依赖 FFmpeg。Dockerfile 会安装这些依赖及可再分发的 Noto CJK 字体，构建需要能够访问基础镜像源、Alpine 软件源和 Python 包索引。
+宿主机直接运行需要 Python 3.11 或更新版本，镜像使用 Python 3.11。WebSocket 等核心功能使用标准库；课表解析依赖 `requirements/bot.txt` 中的 `icalendar`、`python-dateutil` 和 `tzdata`；图片课表使用 Pillow 和中文字体，不需要浏览器；歌曲功能直接下载并转发源文件，不进行本地转码。Dockerfile 会安装这些依赖及可再分发的 Noto CJK 字体，构建需要能够访问基础镜像源、Alpine 软件源和 Python 包索引。
 
 ## 文档导航与当前状态
 
@@ -224,7 +224,8 @@ NAPCAT_WS_URL=ws://host.docker.internal:3001
 | `AUTO_CANDY_EMOJI_ID` | `127852` | 旧版单表情兼容项；当前 Compose 的 `AUTO_EMOJI_IDS` 默认值会优先于它 |
 | `SONG_MAX_DOWNLOAD_MB` | `80` | 单个歌曲源文件下载上限，按 1024 × 1024 字节计算 MB |
 | `SONG_SESSION_MINUTES` | `10` | 歌曲候选会话有效期，单位分钟 |
-| `QUARK_COOKIE` | 空 | 下载夸克分享音频时使用的登录 Cookie |
+| `SONG_MUSIC_SOURCE` | `netease` | 音乐源：`netease`/`tencent`/`kuwo`/`tidal`/`qobuz`/`joox`/`bilibili`/`apple`/`ytmusic`/`spotify`；稳定源为 `netease`、`joox`、`bilibili`，部分源暂不开放 |
+| `SONG_BITRATE` | `320` | 不带音质参数时的默认音质；聊天内可选 `192`/`320`/`740`/`999`，740/999 为无损档（实际码率以上游返回为准） |
 | `DEEPSEEK_API_KEY` | 空 | 群聊总结使用的 API Key |
 | `DEEPSEEK_API_BASE_URL` | `https://api.deepseek.com` | API 根地址，程序会追加 `/chat/completions` |
 | `DEEPSEEK_MODEL` | `deepseek-chat` | 总结使用的模型 |
@@ -234,7 +235,7 @@ NAPCAT_WS_URL=ws://host.docker.internal:3001
 
 `TIMETABLE_DB_PATH` 在源码直接运行时默认指向项目根目录的 `data/timetable.sqlite3`，首次课表数据库操作时自动创建。当前 Compose 将此变量固定为上表路径；自定义路径必须同步调整数据卷挂载，不能只在 `.env` 中改值。
 
-源码另外支持 `XIAGEBA_BASE_URL`（歌曲站点地址，默认 `https://xiageba.liumingye.cn`）以及旧版 `AUTO_EMOJI_QQ`、`AUTO_EMOJI_ID` 环境变量；这些变量当前没有通过 Compose 透传。需要在容器中使用时，应自行添加到服务的 `environment` 中。
+源码另外支持 `GD_MUSIC_API_URL`（GD 音乐台 API 地址，默认 `https://music-api.gdstudio.xyz/api.php`）以及旧版 `AUTO_EMOJI_QQ`、`AUTO_EMOJI_ID` 环境变量；这些变量当前没有通过 Compose 透传。需要在容器中使用时，应自行添加到服务的 `environment` 中。
 
 ## 插件配置与控制台
 
@@ -592,17 +593,23 @@ bot 会整理成员显示名和消息的文本表示、过滤总结指令，将�
 
 ### 歌曲搜索与下载
 
-`@bot /song 歌曲名称` 从 [下歌吧](https://xiageba.liumingye.cn/) 搜索并列出最多 10 首候选，包含歌名、歌手和专辑。当前成员随后输入 `@bot /song 2` 或 `@bot /song 选择 2`，bot 才会读取详情、下载可用音频、转换为 MP3 并发送。
+`@bot /song 歌曲名称` 从 [GD 音乐台](https://music.gdstudio.xyz/)（API：`music-api.gdstudio.xyz`）搜索并列出最多 10 首候选，包含歌名、歌手和专辑。当前成员随后输入：
+
+- `@bot /song 2` 或 `@bot /song 选择 2`：按默认音质（`SONG_BITRATE`，默认 `320`）下载；
+- `@bot /song 2+320`（也支持 `选择 2+999`、`2 740`）：按**指定音质**下载，音质可选 `192` / `320` / `740` / `999`（740/999 为无损档，实际码率以上游返回为准）。
+
+bot 会在**同一条消息**中返回歌曲详情（歌名、歌手、专辑、音质、文件大小）和专辑封面图，随后获取直链并**直接发送源文件**（MP3 或 FLAC，不做二次转码，与网页下载的文件一致）。全程无需任何网盘 Cookie。
 
 - `@bot /song 取消` 或 `@bot /song cancel` 可取消候选；默认有效期 10 分钟，选择后消耗该候选会话。
 - 候选按群聊 / 私聊范围和用户区分，仅保存在内存中，重启后清空。
-- `SONG_MAX_DOWNLOAD_MB` 限制源文件大小，默认 80 MB；使用本地 FFmpeg 转为 MP3。
+- 封面通过 `types=pic` 接口获取，以 base64 图片段内嵌在同一条消息中；封面获取失败时只发送文字详情，不影响下载。
+- 源文件格式按文件头自动识别（MP3/FLAC/M4A/WAV/OGG），文件名保留原始扩展名。
+- `SONG_MUSIC_SOURCE` 选择音乐源，默认 `netease`。若当前音源不支持所选音质，bot 会回复 `当前音源不支持所选音质（xxxkbps），请降低音质后重试。`
+- `SONG_MAX_DOWNLOAD_MB` 限制源文件大小，默认 80 MB。无损档单曲可能达 70 MB 以上，下载 999 音质失败时可调大此上限。
 - 文件通过 NapCat 的 `upload_group_file` 或 `upload_private_file` 以 `base64://` 上传，不是 QQ 音乐卡片。发送动作后清理本地临时文件，无需在 bot 和 NapCat 之间共享下载目录。
-- 站点接口、分享有效期、文件大小及 NapCat 文件上传能力都可能影响可用性；未找到时回复 `私密马赛，没有找到喵~`。
+- 上游接口限制 5 分钟内不超过 50 次请求，触发限流时回复 `请求过于频繁，请稍后再试。`；歌曲无版权或已下架时回复 `该歌曲暂时无法获取下载链接，可能无版权或已下架。`；未找到时回复 `私密马赛，没有找到喵~`。
 
-如果搜索结果中的下载源是夸克分享页，需要配置 `QUARK_COOKIE`。bot 会优先选择分享顶层列表中的 MP3（也支持其他常见音频格式），临时转存到账号根目录下的 `qqbot-song-*` 文件夹，获取直链并下载，最后尝试删除该临时文件夹。当前不支持带提取码的分享或递归查找子文件夹；清理失败时日志会给出警告，可能需要手动清理。
-
-若只有夸克分享页且未配置 Cookie，或只有百度/阿里等不支持自动下载的网盘分享页，bot 会返回原始链接。Cookie 失效或下载失败则提示失败，需要修复配置后重新搜索。
+> API 出处：[GD音乐台(music.gdstudio.xyz)](https://music.gdstudio.xyz/)，该接口声明仅限学习参考、严禁商用；音乐源可用性由上游动态调整。
 
 ## 本地开发与测试
 
@@ -622,7 +629,7 @@ $env:LISTEN_PORT = "8080"
 .\.venv\Scripts\python.exe bot.py
 ```
 
-在此示例中，本机 NapCat 可连接 `ws://127.0.0.1:8080`；跨容器或跨机器连接需调整监听地址。若没有设置任何环境变量，源码默认是 `client` 模式，连接 `ws://napcat:3001`，与 Compose 默认值不同。需要歌曲下载时，宿主机还须安装 FFmpeg 并将其加入 `PATH`。
+在此示例中，本机 NapCat 可连接 `ws://127.0.0.1:8080`；跨容器或跨机器连接需调整监听地址。若没有设置任何环境变量，源码默认是 `client` 模式，连接 `ws://napcat:3001`，与 Compose 默认值不同。
 
 全量回归还包含独立 WebUI，请先按上文“隔离测试与迁移状态”安装 `.venv-webui` 中的测试依赖。安装依赖和中文字体后，运行测试无需 NapCat、API Key 或第三方测试框架：
 
@@ -630,7 +637,7 @@ $env:LISTEN_PORT = "8080"
 .\.venv-webui\Scripts\python.exe -B -m unittest discover -s tests -v
 ```
 
-测试使用模拟接口及本机回环 HTTP 服务，覆盖配置读写、指令解析、自动表情、群聊总结、结芬/求偶、歌曲/小说解析、分层帮助及卡片发送/超时回退，以及课表文件接收、双事件去重、格式和大小拒绝、ICS 时区/重复/改期/排除规则、解析限额和进程终止、会话隔离、过期、取消、并发、SQLite 持久化与更新回滚、课程查询时间边界、当前成员过滤与昵称刷新、成员接口失败的安全处理、SQLite 在线备份及 WebSocket 动作响应等逻辑，不访问真实群聊或外部 API，也不代替真实 NapCat、外部网站、DeepSeek 和 FFmpeg 的联调。ICS 自动化测试使用脱敏合成数据和临时数据库，不读取个人下载目录中的原始样本，也不会写入运行中的正式课表库。图片测试还覆盖内存 PNG/Base64、绘图布局/分页/大小限额、14:30/15:55 与跨午夜更新、头像异常及缓存淘汰、线程真实结束前不释放限额、取消/关闭后不迟发、图片回执确认与不盲重发、数据库更新后立即使用新内容。头像 HTTPS 完全模拟，不下载真实 QQ 头像。群聊隔离测试覆盖默认开关、WebUI 配置保存与禁用状态、按 QQ 跨群查询、历史多份选择、共享更新/并发冲突、恢复隔离和当前群成员过滤。
+测试使用模拟接口及本机回环 HTTP 服务，覆盖配置读写、指令解析、自动表情、群聊总结、结芬/求偶、歌曲/小说解析、分层帮助及卡片发送/超时回退，以及课表文件接收、双事件去重、格式和大小拒绝、ICS 时区/重复/改期/排除规则、解析限额和进程终止、会话隔离、过期、取消、并发、SQLite 持久化与更新回滚、课程查询时间边界、当前成员过滤与昵称刷新、成员接口失败的安全处理、SQLite 在线备份及 WebSocket 动作响应等逻辑，不访问真实群聊或外部 API，也不代替真实 NapCat、外部网站和 DeepSeek 的联调。ICS 自动化测试使用脱敏合成数据和临时数据库，不读取个人下载目录中的原始样本，也不会写入运行中的正式课表库。图片测试还覆盖内存 PNG/Base64、绘图布局/分页/大小限额、14:30/15:55 与跨午夜更新、头像异常及缓存淘汰、线程真实结束前不释放限额、取消/关闭后不迟发、图片回执确认与不盲重发、数据库更新后立即使用新内容。头像 HTTPS 完全模拟，不下载真实 QQ 头像。群聊隔离测试覆盖默认开关、WebUI 配置保存与禁用状态、按 QQ 跨群查询、历史多份选择、共享更新/并发冲突、恢复隔离和当前群成员过滤。
 
 添加新插件时，需要在 `plugin_control.py` 注册定义、在 `bot.py` 的工厂映射中注册实现，并按需补充 `plugins/help_menu.py` 的帮助指令、分类标题/别名和测试；卡片与文字共用这些数据。仅放入 `plugins/` 目录不会被自动发现。插件的可选 `handle_event()` 只接收消息事件，`handle_notice()` 接收通知事件；需要清理暂存或定时器时可实现同步 `close()`，bot 停止时会调用。
 

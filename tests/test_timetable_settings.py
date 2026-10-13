@@ -64,7 +64,7 @@ class TimetableSettingsTest(unittest.TestCase):
             with self.subTest(value=value), patch("bot.load_plugin_config", return_value=PluginConfig(
                 ("timetable",), {"timetable": {"group_isolation_enabled": value}},
             )), patch.dict(os.environ, {"TIMETABLE_DB_PATH": str(self.directory / "bot.sqlite3")}):
-                bot = NapCatBot(BotConfig("server", "ws://example.invalid", None, "999", "127.0.0.1", 8080, 5.0, None))
+                bot = NapCatBot(BotConfig("server", "ws://example.invalid", None, "999", "127.0.0.1", 8080, 5.0))
                 try:
                     self.assertEqual(len(bot.plugins), 1)
                     self.assertIsInstance(bot.plugins[0], TimetablePlugin)
@@ -76,7 +76,7 @@ class TimetableSettingsTest(unittest.TestCase):
     def test_old_config_and_disabled_plugin_keep_existing_behavior(self):
         for ids in (("timetable",), ("basic",)):
             with self.subTest(ids=ids), patch("bot.load_plugin_config", return_value=PluginConfig(ids, {})):
-                bot = NapCatBot(BotConfig("server", "ws://example.invalid", None, "999", "127.0.0.1", 8080, 5.0, None))
+                bot = NapCatBot(BotConfig("server", "ws://example.invalid", None, "999", "127.0.0.1", 8080, 5.0))
                 try:
                     timetables = [p for p in bot.plugins if isinstance(p, TimetablePlugin)]
                     self.assertEqual(len(timetables), int("timetable" in ids))

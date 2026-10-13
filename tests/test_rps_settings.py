@@ -37,7 +37,7 @@ class RpsSettingsTests(unittest.TestCase):
         from bot import NapCatBot, BotConfig
         from plugin_control import PluginConfig
         with patch("bot.load_plugin_config",return_value=PluginConfig(("rps",),{"rps":{"ban_seconds":"120"}})):
-            bot=NapCatBot(BotConfig("server","ws://example.invalid",None,"999","127.0.0.1",8080,5.0,None))
+            bot=NapCatBot(BotConfig("server","ws://example.invalid",None,"999","127.0.0.1",8080,5.0))
         self.addCleanup(bot.stop)
         plugin=bot.plugins[0]
         self.assertEqual(plugin.ban_seconds,120)

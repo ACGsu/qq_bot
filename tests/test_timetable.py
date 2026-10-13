@@ -1598,7 +1598,7 @@ class BotTimetableRoutingTest(unittest.IsolatedAsyncioTestCase):
     def make_bot(self, enabled=("timetable", "basic")):
         config = BotConfig(
             websocket_mode="server", ws_url="ws://napcat:3001", access_token=None, bot_qq="999",
-            listen_host="127.0.0.1", listen_port=8080, reconnect_seconds=1, quark_cookie=None,
+            listen_host="127.0.0.1", listen_port=8080, reconnect_seconds=1,
         )
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)

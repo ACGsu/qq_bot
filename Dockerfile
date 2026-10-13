@@ -18,7 +18,7 @@ RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
     && installed=0 \
     && for attempt in 1 2 3; do \
         if apk --timeout 30 --cache-dir /var/cache/apk --cache-predownload --cache-packages \
-            add --update-cache ffmpeg font-noto-cjk; then \
+            add --update-cache font-noto-cjk; then \
             installed=1; break; \
         fi; \
         echo "Alpine package download/install failed (attempt $attempt/3)" >&2; \

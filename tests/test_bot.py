@@ -34,24 +34,28 @@ from bot import (
     parse_novel_catalog,
     parse_novel_links,
     parse_ordinal_command,
-    parse_song_details_response,
     parse_song_search_response,
     parse_song_selection,
+    parse_song_size_mb,
     play_rock_paper_scissors,
     wife_candidates,
-    choose_song_source,
-    choose_quark_audio_file,
-    download_quark_share_source,
+    detect_song_extension,
+    fetch_song_cover,
+    fetch_song_download,
+    fetch_song_url,
+    format_song_details,
     format_song_search_results,
     GroupSummaryPlugin,
+    join_song_artists,
     safe_song_filename,
-    quark_share_id,
+    song_quality_label,
     message_to_text,
     summarize_group_messages,
     extract_history_messages,
-    SongDetails,
+    SongApiError,
     SongDownload,
     SongResult,
+    SongUnavailableError,
     today_date_key,
 )
 from plugins.daily_wife import MARRIAGE_FAIL_MESSAGE, MARRIAGE_SUCCESS_MESSAGE
@@ -253,114 +257,217 @@ class BotCommandTest(unittest.TestCase):
         self.assertEqual(catalog.chapters[2].volume_title, "第二卷")
 
     def test_parse_song_search_response(self) -> None:
-        payload = {
-            "data": [
-                {
-                    "id": "song-1",
-                    "title": "secret base",
-                    "artist": "茅野爱衣 / 户松遥",
-                    "album": "未闻花名",
-                    "cover": "https://example.com/cover.jpg",
-                }
-            ],
-            "total": 1,
-        }
+        payload = [
+            {
+                "id": "33911781",
+                "name": "secret base ~君がくれたもの~ (10 years after Ver.)",
+                "artist": ["茅野愛衣", "戸松遥", "早見沙織"],
+                "album": "secret base ～君がくれたもの～",
+                "pic_id": "109951166198069948",
+                "source": "netease",
+            }
+        ]
 
         songs = parse_song_search_response(payload)
 
         self.assertEqual(len(songs), 1)
-        self.assertEqual(songs[0].title, "secret base")
-        self.assertEqual(songs[0].artist, "茅野爱衣 / 户松遥")
-        self.assertEqual(songs[0].album, "未闻花名")
-        self.assertEqual(songs[0].song_id, "song-1")
+        self.assertEqual(songs[0].title, "secret base ~君がくれたもの~ (10 years after Ver.)")
+        self.assertEqual(songs[0].artist, "茅野愛衣、戸松遥、早見沙織")
+        self.assertEqual(songs[0].album, "secret base ～君がくれたもの～")
+        self.assertEqual(songs[0].song_id, "33911781")
+        self.assertEqual(songs[0].pic_id, "109951166198069948")
+        self.assertEqual(songs[0].source, "netease")
 
-    def test_parse_song_details_accepts_single_download_object(self) -> None:
-        details = parse_song_details_response(
-            {
-                "id": "song-1",
-                "title": "歌",
-                "artist": "歌手",
-                "album": "专辑",
-                "downloads": {"quality": "MP3 320k", "url": "https://cdn.example.com/song.mp3"},
-            }
-        )
+    def test_parse_song_search_response_skips_invalid_items(self) -> None:
+        payload = [
+            {"id": "1", "name": "歌"},
+            {"id": "2"},
+            {"name": "无 ID"},
+            "not-a-dict",
+        ]
 
-        self.assertEqual(details.artist, "歌手")
-        self.assertEqual(details.downloads, (SongDownload("MP3 320k", "https://cdn.example.com/song.mp3"),))
+        songs = parse_song_search_response(payload)
+
+        self.assertEqual([song.song_id for song in songs], ["1"])
+        self.assertEqual(songs[0].artist, "未知歌手")
+        self.assertEqual(songs[0].album, "")
+
+    def test_join_song_artists_accepts_list_and_string(self) -> None:
+        self.assertEqual(join_song_artists(["A", "B"]), "A、B")
+        self.assertEqual(join_song_artists("A / B"), "A / B")
+        self.assertEqual(join_song_artists(None), "未知歌手")
+        self.assertEqual(join_song_artists([]), "未知歌手")
+
+    def test_parse_song_size_mb_handles_bytes_and_kilobytes(self) -> None:
+        self.assertEqual(parse_song_size_mb(14211701), 13.6)
+        self.assertEqual(parse_song_size_mb(14211), 13.9)
+        self.assertIsNone(parse_song_size_mb(0))
+        self.assertIsNone(parse_song_size_mb(None))
+        self.assertIsNone(parse_song_size_mb("bad"))
+
+    def test_fetch_song_url_parses_direct_link(self) -> None:
+        with patch(
+            "plugins.song.fetch_json",
+            return_value={"url": "https://m701.music.126.net/example.mp3", "br": 320, "size": 14211701},
+        ) as fetch:
+            download = fetch_song_url("33911781")
+
+        self.assertEqual(download, SongDownload("https://m701.music.126.net/example.mp3", 13.6, 320))
+        self.assertIn("types=url", fetch.call_args.args[0])
+        self.assertIn("br=320", fetch.call_args.args[0])
+
+    def test_fetch_song_url_rejects_missing_link(self) -> None:
+        with patch("plugins.song.fetch_json", return_value={"url": "", "br": -1, "size": 0}):
+            with self.assertRaises(SongUnavailableError):
+                fetch_song_url("notexist123")
+
+    def test_fetch_song_download_accepts_requested_quality(self) -> None:
+        song = SongResult("song-1", "歌", "歌手", "专辑", "pic-1", "netease")
+        with patch(
+            "plugins.song.fetch_song_url",
+            return_value=SongDownload("https://cdn.example.com/song.mp3", 13.6, 320),
+        ) as fetch:
+            download = fetch_song_download(song, "320")
+
+        self.assertEqual(download.bitrate, 320)
+        self.assertEqual(fetch.call_args.kwargs["bitrate"], "320")
+        self.assertEqual(fetch.call_args.kwargs["source"], "netease")
+
+    def test_fetch_song_download_accepts_lossless_with_higher_returned_bitrate(self) -> None:
+        song = SongResult("song-1", "歌", "歌手", "专辑", "", "netease")
+        with patch(
+            "plugins.song.fetch_song_url",
+            return_value=SongDownload("https://cdn.example.com/song.flac", 71.2, 813),
+        ):
+            download = fetch_song_download(song, "999")
+
+        self.assertEqual(download.bitrate, 813)
+
+    def test_fetch_song_download_rejects_quality_below_floor(self) -> None:
+        song = SongResult("song-1", "歌", "歌手", "专辑", "", "netease")
+        with patch(
+            "plugins.song.fetch_song_url",
+            return_value=SongDownload("https://cdn.example.com/song.mp3", 5.7, 128),
+        ):
+            with self.assertRaises(SongApiError) as ctx:
+                fetch_song_download(song, "320")
+
+        self.assertIn("当前音源不支持所选音质（320kbps，实际仅支持 128kbps），请降低音质后重试。", str(ctx.exception))
+
+    def test_fetch_song_download_prompts_lower_quality_when_unsupported(self) -> None:
+        song = SongResult("song-1", "歌", "歌手", "专辑", "", "netease")
+        responses = [SongUnavailableError("no url"), SongDownload("https://cdn.example.com/song.mp3", 13.6, 320)]
+        with patch("plugins.song.fetch_song_url", side_effect=responses) as fetch:
+            with self.assertRaises(SongApiError) as ctx:
+                fetch_song_download(song, "999")
+
+        self.assertIn("当前音源不支持所选音质（999kbps），请降低音质后重试。", str(ctx.exception))
+        self.assertEqual(fetch.call_count, 2)
+        self.assertEqual(fetch.call_args.kwargs["bitrate"], "320")
+
+    def test_fetch_song_download_reports_unavailable_when_probe_also_fails(self) -> None:
+        song = SongResult("song-1", "歌", "歌手", "专辑", "", "netease")
+        with patch("plugins.song.fetch_song_url", side_effect=SongUnavailableError("no url")):
+            with self.assertRaises(SongApiError) as ctx:
+                fetch_song_download(song, "999")
+
+        self.assertIn("该歌曲暂时无法获取下载链接", str(ctx.exception))
+
+    def test_fetch_song_download_320_failure_raises_unavailable_without_probe(self) -> None:
+        song = SongResult("song-1", "歌", "歌手", "专辑", "", "netease")
+        with patch("plugins.song.fetch_song_url", side_effect=SongUnavailableError("no url")) as fetch:
+            with self.assertRaises(SongUnavailableError):
+                fetch_song_download(song, "320")
+
+        self.assertEqual(fetch.call_count, 1)
+
+    def test_fetch_song_cover_downloads_image_bytes(self) -> None:
+        class FakeResponse:
+            headers = {"Content-Type": "image/jpeg"}
+
+            def read(self, size: int = -1) -> bytes:
+                return b"cover-bytes"
+
+            def __enter__(self) -> "FakeResponse":
+                return self
+
+            def __exit__(self, *args: object) -> bool:
+                return False
+
+        with patch(
+            "plugins.song.fetch_json",
+            return_value={"url": "https://p2.music.126.net/cover.jpg"},
+        ), patch("plugins.song.request.urlopen", return_value=FakeResponse()):
+            cover = fetch_song_cover("109951166198069948")
+
+        self.assertEqual(cover, b"cover-bytes")
+
+    def test_fetch_song_cover_returns_none_without_pic_id(self) -> None:
+        self.assertIsNone(fetch_song_cover(""))
+
+    def test_fetch_song_cover_returns_none_on_failure(self) -> None:
+        with patch("plugins.song.fetch_json", side_effect=RuntimeError("boom")):
+            self.assertIsNone(fetch_song_cover("pic-1"))
 
     def test_song_selection_and_result_format(self) -> None:
         songs = [SongResult("song-1", "歌", "歌手", "专辑", "")]
 
-        self.assertEqual(parse_song_selection("2"), 2)
-        self.assertEqual(parse_song_selection("选择 3"), 3)
+        self.assertEqual(parse_song_selection("2"), (2, None))
+        self.assertEqual(parse_song_selection("选择 3"), (3, None))
+        self.assertEqual(parse_song_selection("2+320"), (2, "320"))
+        self.assertEqual(parse_song_selection("选择 2+999"), (2, "999"))
+        self.assertEqual(parse_song_selection("2 740"), (2, "740"))
         self.assertIsNone(parse_song_selection("歌名"))
+
         rendered = format_song_search_results(songs)
         self.assertIn("1. 歌 - 歌手，专辑：专辑", rendered)
         self.assertIn("@bot /song 2", rendered)
+        self.assertIn("2+320", rendered)
 
-    def test_choose_song_source_rejects_netdisk_share_page(self) -> None:
-        share_only = SongDetails(
-            "song-1",
-            "歌",
-            "歌手",
-            "",
-            "",
-            "",
-            (SongDownload("夸克MP3", "https://pan.quark.cn/s/abc"),),
-        )
-        direct = SongDetails(
-            "song-2",
-            "歌",
-            "歌手",
-            "",
-            "",
-            "",
-            (
-                SongDownload("FLAC", "https://cdn.example.com/song.flac"),
-                SongDownload("MP3 320k", "https://cdn.example.com/song.mp3"),
-            ),
-        )
+    def test_format_song_details_includes_quality_and_size(self) -> None:
+        song = SongResult("song-1", "歌", "歌手", "专辑", "pic-1")
+        rendered = format_song_details(song, SongDownload("https://cdn.example.com/song.mp3", 13.6, 320))
 
-        self.assertIsNone(choose_song_source(share_only))
-        self.assertEqual(choose_song_source(share_only, allow_quark=True), share_only.downloads[0])
-        self.assertEqual(choose_song_source(direct), direct.downloads[1])
+        self.assertIn("歌曲：歌", rendered)
+        self.assertIn("歌手：歌手", rendered)
+        self.assertIn("专辑：专辑", rendered)
+        self.assertIn("音质：320kbps（约 13.6 MB）", rendered)
 
-    def test_quark_share_id_and_audio_selection(self) -> None:
-        self.assertEqual(quark_share_id("https://pan.quark.cn/s/abc123"), "abc123")
-        items = [
-            {"fid": "folder", "file_name": "音乐", "dir": True},
-            {"fid": "flac", "file_name": "song.flac", "dir": False},
-            {"fid": "mp3", "file_name": "song.mp3", "dir": False},
-        ]
+    def test_format_song_details_marks_lossless(self) -> None:
+        song = SongResult("song-1", "歌", "歌手", "专辑", "")
+        rendered = format_song_details(song, SongDownload("https://cdn.example.com/song.flac", 71.2, 1682))
 
-        self.assertEqual(choose_quark_audio_file(items)["fid"], "mp3")
+        self.assertIn("音质：1682kbps（无损）（约 71.2 MB）", rendered)
 
-    def test_quark_download_flow_cleans_temporary_folder(self) -> None:
-        responses = [
-            {"status": 200, "data": {"stoken": "token"}},
-            {"status": 200, "data": {"list": [{"fid": "shared", "file_name": "song.mp3", "dir": False}]}},
-            {"status": 200, "data": {"fid": "temp-folder"}},
-            {"status": 200, "data": {}},
-            {"status": 200, "data": {"list": [{"fid": "stored", "file_name": "song.mp3", "dir": False}]}},
-            {"status": 200, "data": [{"download_url": "https://cdn.example.com/song.mp3"}]},
-            {"status": 200, "data": {}},
-        ]
-
-        with patch("plugins.song.quark_api_request", side_effect=responses) as api_request, patch(
-            "plugins.song.download_song_source"
-        ) as download:
-            download_quark_share_source("https://pan.quark.cn/s/abc123", "secret-cookie", Path("song.source"))
-
-        download.assert_called_once_with(
-            "https://cdn.example.com/song.mp3",
-            Path("song.source"),
-            max_bytes=80 * 1024 * 1024,
-            cookie="secret-cookie",
-        )
-        self.assertEqual(api_request.call_args_list[-1].args[1], "file/delete")
+    def test_song_quality_label(self) -> None:
+        self.assertEqual(song_quality_label(320), "320kbps")
+        self.assertEqual(song_quality_label(740), "740kbps（无损）")
+        self.assertEqual(song_quality_label(0), "未知音质")
 
     def test_safe_song_filename(self) -> None:
         self.assertEqual(safe_song_filename('A/B: C?'), "A_B_ C.mp3")
+        self.assertEqual(safe_song_filename("歌", ".flac"), "歌.flac")
+        self.assertEqual(safe_song_filename("歌", "flac"), "歌.flac")
+
+    def test_detect_song_extension_by_magic_bytes(self) -> None:
+        cases = {
+            "flac": (b"fLaC" + b"\x00" * 8, ".flac"),
+            "mp3_id3": (b"ID3\x03\x00\x00\x00" + b"\x00" * 6, ".mp3"),
+            "mp3_frame": (b"\xff\xfb\x90\x00" + b"\x00" * 8, ".mp3"),
+            "ogg": (b"OggS\x00\x02" + b"\x00" * 6, ".ogg"),
+            "wav": (b"RIFF\x24\x00\x00\x00WAVE", ".wav"),
+            "m4a": (b"\x00\x00\x00\x18ftypM4A ", ".m4a"),
+            "unknown": (b"\x00\x01\x02\x03" + b"\x00" * 8, ".mp3"),
+        }
+        with TemporaryDirectory() as temp:
+            base = Path(temp)
+            for name, (data, expected) in cases.items():
+                path = base / f"{name}.bin"
+                path.write_bytes(data)
+                self.assertEqual(detect_song_extension(path), expected, name)
+            fallback = base / "fallback.bin"
+            fallback.write_bytes(cases["unknown"][0])
+            self.assertEqual(detect_song_extension(fallback, "https://cdn.example.com/a/b.flac"), ".flac")
 
 
 class FakeWebSocket:
@@ -380,7 +487,6 @@ def bot_config(**overrides):
         "listen_host": "127.0.0.1",
         "listen_port": 8080,
         "reconnect_seconds": 5.0,
-        "quark_cookie": None,
     }
     values.update(overrides)
     return BotConfig(**values)
