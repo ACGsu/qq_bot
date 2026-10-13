@@ -1,8 +1,11 @@
 import asyncio
+import hashlib
 import json
+import math
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Any
 from unittest.mock import patch
 
 from plugin_control import (
@@ -37,6 +40,7 @@ from bot import (
     parse_song_search_response,
     parse_song_selection,
     parse_song_size_mb,
+    parse_song_site_suffix,
     play_rock_paper_scissors,
     wife_candidates,
     detect_song_extension,
@@ -49,14 +53,26 @@ from bot import (
     join_song_artists,
     safe_song_filename,
     song_quality_label,
+    split_site_suffix,
     message_to_text,
     summarize_group_messages,
     extract_history_messages,
     SongApiError,
     SongDownload,
+    SongPlugin,
     SongResult,
     SongUnavailableError,
+    OneBotActionError,
+    file_sha256,
+    precheck_song_size,
     today_date_key,
+)
+from plugins.song_siren import (
+    fetch_siren_catalog,
+    fetch_siren_cover,
+    fetch_siren_url,
+    parse_siren_songs,
+    search_siren_songs,
 )
 from plugins.daily_wife import MARRIAGE_FAIL_MESSAGE, MARRIAGE_SUCCESS_MESSAGE
 from plugins.courtship import CourtshipPlugin, COURTSHIP_REJECT_MESSAGE, COURTSHIP_SUCCESS_MESSAGE
@@ -468,6 +484,457 @@ class BotCommandTest(unittest.TestCase):
             fallback = base / "fallback.bin"
             fallback.write_bytes(cases["unknown"][0])
             self.assertEqual(detect_song_extension(fallback, "https://cdn.example.com/a/b.flac"), ".flac")
+
+    def test_parse_song_site_suffix(self) -> None:
+        self.assertEqual(parse_song_site_suffix("大地之盐+塞壬唱片"), ("大地之盐", "siren"))
+        self.assertEqual(parse_song_site_suffix("a+b＋塞壬唱片"), ("a+b", "siren"))
+        self.assertIsNone(parse_song_site_suffix("2+塞壬唱片"))
+        self.assertIsNone(parse_song_site_suffix("选择 2+塞壬唱片"))
+        self.assertIsNone(parse_song_site_suffix("塞壬唱片"))
+        self.assertIsNone(parse_song_site_suffix("+塞壬唱片"))
+        self.assertIsNone(parse_song_site_suffix("未闻花名+320"))
+
+    def test_split_site_suffix(self) -> None:
+        self.assertEqual(split_site_suffix("大地之盐+塞壬唱片"), ("大地之盐", True))
+        self.assertEqual(split_site_suffix("1＋塞壬唱片"), ("1", True))
+        self.assertEqual(split_site_suffix("未闻花名"), ("未闻花名", False))
+
+    def test_parse_siren_songs_maps_to_song_result(self) -> None:
+        albums = {"8913": {"cid": "8913", "name": "昨日海OST"}}
+        payload = [
+            {"cid": "048756", "name": "Song of the Nameless", "albumCid": "8913", "artists": ["塞壬唱片-MSR"]},
+            {"cid": "697672", "name": "大地之盐", "albumCid": "0227", "artists": ["塞壬唱片-MSR", "Mili"]},
+            {"name": "无 ID"},
+            "not-a-dict",
+        ]
+
+        songs = parse_siren_songs(payload, albums)
+
+        self.assertEqual([song.song_id for song in songs], ["048756", "697672"])
+        self.assertEqual(songs[0].title, "Song of the Nameless")
+        self.assertEqual(songs[0].artist, "塞壬唱片-MSR")
+        self.assertEqual(songs[0].album, "昨日海OST")
+        self.assertEqual(songs[0].pic_id, "8913")
+        self.assertEqual(songs[0].source, "monster-siren")
+        # 专辑映射缺失时专辑名为空，不阻断映射
+        self.assertEqual(songs[1].album, "")
+        self.assertEqual(songs[1].artist, "塞壬唱片-MSR、Mili")
+
+    def test_search_siren_songs_matches_name_and_album(self) -> None:
+        songs_payload = [
+            {"cid": "697672", "name": "大地之盐", "albumCid": "0227", "artists": ["塞壬唱片-MSR"]},
+            {"cid": "514590", "name": "大地之盐 (Instrumental)", "albumCid": "0227", "artists": ["塞壬唱片-MSR"]},
+            {"cid": "779441", "name": "拟生态", "albumCid": "4596", "artists": ["塞壬唱片-MSR"]},
+        ]
+        albums = {
+            "0227": {"cid": "0227", "name": "大地之盐"},
+            "4596": {"cid": "4596", "name": "矢量突破拟生态OST"},
+        }
+        with patch("plugins.song_siren.fetch_siren_catalog", return_value=(songs_payload, albums)):
+            by_name = search_siren_songs("大地之盐")
+            by_album = search_siren_songs("矢量突破")
+            missing = search_siren_songs("不存在的歌")
+
+        self.assertEqual([song.song_id for song in by_name], ["697672", "514590"])
+        self.assertEqual([song.song_id for song in by_album], ["779441"])
+        self.assertEqual(missing, [])
+        self.assertEqual(search_siren_songs("  "), [])
+
+    def test_fetch_siren_url_parses_source(self) -> None:
+        song = SongResult("048756", "Song of the Nameless", "塞壬唱片-MSR", "昨日海OST", "8913", "monster-siren")
+        with patch(
+            "plugins.song_siren._fetch_json",
+            return_value={"code": 0, "data": {"cid": "048756", "sourceUrl": "https://res01.hycdn.cn/x.wav"}},
+        ) as fetch:
+            download = fetch_siren_url(song)
+
+        self.assertEqual(download, SongDownload("https://res01.hycdn.cn/x.wav", None, 0))
+        self.assertIn("/api/song/048756", fetch.call_args.args[0])
+
+    def test_fetch_siren_url_rejects_missing_source(self) -> None:
+        song = SongResult("048756", "歌", "塞壬唱片-MSR", "", "8913", "monster-siren")
+        with patch("plugins.song_siren._fetch_json", return_value={"code": 0, "data": {"sourceUrl": ""}}):
+            with self.assertRaises(SongUnavailableError):
+                fetch_siren_url(song)
+
+    def test_fetch_siren_cover_downloads_album_cover(self) -> None:
+        class FakeResponse:
+            headers = {"Content-Type": "image/jpeg"}
+
+            def read(self, size: int = -1) -> bytes:
+                return b"cover-bytes"
+
+            def __enter__(self) -> "FakeResponse":
+                return self
+
+            def __exit__(self, *args: object) -> bool:
+                return False
+
+        albums = {"8913": {"cid": "8913", "name": "昨日海OST", "coverUrl": "https://web.hycdn.cn/cover.jpg"}}
+        with patch("plugins.song_siren.fetch_siren_catalog", return_value=([], albums)), patch(
+            "plugins.song_siren.request.urlopen", return_value=FakeResponse()
+        ):
+            cover = fetch_siren_cover("8913")
+
+        self.assertEqual(cover, b"cover-bytes")
+        self.assertIsNone(fetch_siren_cover(""))
+        self.assertIsNone(fetch_siren_cover("不存在"))
+
+    def test_fetch_siren_cover_returns_none_on_failure(self) -> None:
+        with patch("plugins.song_siren.fetch_siren_catalog", side_effect=RuntimeError("boom")):
+            self.assertIsNone(fetch_siren_cover("8913"))
+
+
+class StubSongBot:
+    def __init__(self, request_responder: Any = None) -> None:
+        self.replies: list[Any] = []
+        self.actions: list[tuple[str, dict[str, Any]]] = []
+        self.requests: list[tuple[str, dict[str, Any]]] = []
+        self.request_responder = request_responder or (lambda action, params: {"status": "ok", "retcode": 0, "data": {}})
+
+    async def _send_reply(self, websocket: Any, event: dict[str, Any], message: Any) -> None:
+        self.replies.append(message)
+
+    async def _send_action(self, websocket: Any, action: str, params: dict[str, Any]) -> None:
+        self.actions.append((action, params))
+
+    async def _send_action_request(
+        self, websocket: Any, action: str, params: dict[str, Any], timeout: float = 10
+    ) -> dict[str, Any]:
+        self.requests.append((action, params))
+        result = self.request_responder(action, params)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
+def reply_texts(bot: StubSongBot) -> list[str]:
+    texts = []
+    for message in bot.replies:
+        if isinstance(message, str):
+            texts.append(message)
+        else:
+            texts.append("".join(seg.get("data", {}).get("text", "") for seg in message if seg.get("type") == "text"))
+    return texts
+
+
+class SongSirenRoutingTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.plugin = SongPlugin()
+        self.bot = StubSongBot()
+        self.event = {"message_type": "group", "group_id": 100, "user_id": 111}
+        self.siren_song = SongResult("697672", "大地之盐", "塞壬唱片-MSR", "大地之盐", "0227", "monster-siren")
+        self.gd_song = SongResult("33911781", "secret base", "茅野愛衣", "secret base", "109", "netease")
+
+    def command(self, text: str):
+        return CommandContext(text, [])
+
+    async def _search_siren(self):
+        with patch("plugins.song_siren.search_siren_songs", return_value=[self.siren_song]):
+            await self.plugin.handle(self.bot, None, self.event, self.command("/song 大地之盐+塞壬唱片"))
+
+    async def _search_gd(self):
+        with patch("plugins.song.search_songs", return_value=[self.gd_song]):
+            await self.plugin.handle(self.bot, None, self.event, self.command("/song secret base"))
+
+    def _patch_siren_download(self, cover: bytes | None = b"cover-bytes"):
+        return patch.multiple(
+            "plugins.song_siren",
+            fetch_siren_url=lambda song: SongDownload("https://res01.hycdn.cn/x.wav", None, 0),
+            fetch_siren_cover=lambda album_cid: cover,
+        )
+
+    def _patch_gd_download(self, cover: bytes | None = b"cover-bytes"):
+        return patch.multiple(
+            "plugins.song",
+            fetch_song_download=lambda song, quality: SongDownload("https://cdn.example.com/song.mp3", 13.6, 320),
+            fetch_song_cover=lambda pic_id, source: cover,
+        )
+
+    @staticmethod
+    def _write_source(url: str, output_path: Path, max_bytes: Any = None, referer: Any = None) -> None:
+        if url.endswith(".wav"):
+            output_path.write_bytes(b"RIFF\x24\x00\x00\x00WAVEfmt ")
+        else:
+            output_path.write_bytes(b"ID3\x03\x00\x00\x00" + b"\x00" * 8)
+
+    async def test_siren_search_then_bare_selection_downloads_wav(self) -> None:
+        await self._search_siren()
+        self.assertEqual(self.plugin.song_sessions["100:111"].site, "siren")
+        self.bot.replies.clear()
+
+        with self._patch_siren_download(), patch("plugins.song.download_song_source", self._write_source):
+            await self.plugin.handle(self.bot, None, self.event, self.command("/song 1"))
+
+        texts = "\n".join(reply_texts(self.bot))
+        self.assertIn("音质：WAV 无损", texts)
+        self.assertIn("正在下载源文件：WAV 无损", texts)
+        self.assertEqual(self.plugin.song_sessions.get("100:111"), None)
+        self.assertEqual(len(self.bot.actions), 1)
+        action, params = self.bot.actions[0]
+        self.assertEqual(action, "upload_group_file")
+        self.assertTrue(params["name"].endswith(".wav"), params["name"])
+
+    async def test_siren_search_with_suffix_selection_also_works(self) -> None:
+        await self._search_siren()
+        self.bot.replies.clear()
+
+        with self._patch_siren_download(), patch("plugins.song.download_song_source", self._write_source):
+            await self.plugin.handle(self.bot, None, self.event, self.command("/song 1+塞壬唱片"))
+
+        texts = "\n".join(reply_texts(self.bot))
+        self.assertIn("音质：WAV 无损", texts)
+        self.assertEqual(len(self.bot.actions), 1)
+
+    async def test_siren_session_rejects_quality_argument(self) -> None:
+        await self._search_siren()
+        self.bot.replies.clear()
+
+        await self.plugin.handle(self.bot, None, self.event, self.command("/song 1+320"))
+
+        texts = "\n".join(reply_texts(self.bot))
+        self.assertIn("当前为塞壬唱片源，仅提供 WAV 无损，无音质选择", texts)
+        self.assertEqual(self.bot.actions, [])
+        # 拒绝后会话仍在，裸序号仍可下载
+        self.assertIn("100:111", self.plugin.song_sessions)
+
+    async def test_gd_session_rejects_siren_selection(self) -> None:
+        await self._search_gd()
+        self.bot.replies.clear()
+
+        await self.plugin.handle(self.bot, None, self.event, self.command("/song 1+塞壬唱片"))
+
+        texts = "\n".join(reply_texts(self.bot))
+        self.assertIn("当前候选来自默认音乐源；塞壬唱片请重新搜索：@bot /song 关键词+塞壬唱片", texts)
+        self.assertEqual(self.bot.actions, [])
+
+    async def test_gd_session_bare_selection_still_downloads_gd(self) -> None:
+        await self._search_gd()
+        self.bot.replies.clear()
+
+        with self._patch_gd_download(), patch("plugins.song.download_song_source", self._write_source):
+            await self.plugin.handle(self.bot, None, self.event, self.command("/song 1"))
+
+        texts = "\n".join(reply_texts(self.bot))
+        self.assertIn("音质：320kbps（约 13.6 MB）", texts)
+        action, params = self.bot.actions[0]
+        self.assertEqual(action, "upload_group_file")
+        self.assertTrue(params["name"].endswith(".mp3"), params["name"])
+
+    async def test_siren_search_without_suffix_does_not_trigger_siren(self) -> None:
+        with patch("plugins.song_siren.search_siren_songs") as siren_search, patch(
+            "plugins.song.search_songs", return_value=[self.gd_song]
+        ):
+            await self.plugin.handle(self.bot, None, self.event, self.command("/song 塞壬唱片"))
+
+        siren_search.assert_not_called()
+        self.assertEqual(self.plugin.song_sessions["100:111"].site, "gd")
+
+    async def test_siren_search_without_session_prompts_research(self) -> None:
+        await self.plugin.handle(self.bot, None, self.event, self.command("/song 1+塞壬唱片"))
+
+        texts = "\n".join(reply_texts(self.bot))
+        self.assertIn("歌曲候选已过期，请重新输入：@bot /song 歌曲名称+塞壬唱片", texts)
+        self.assertEqual(self.bot.actions, [])
+
+    async def test_siren_search_api_error_is_relayed(self) -> None:
+        with patch("plugins.song_siren.search_siren_songs", side_effect=SongApiError("请求过于频繁，请稍后再试。")):
+            await self.plugin.handle(self.bot, None, self.event, self.command("/song 大地之盐+塞壬唱片"))
+
+        self.assertIn("请求过于频繁，请稍后再试。", "\n".join(reply_texts(self.bot)))
+
+    async def test_large_file_announced_before_download_via_head(self) -> None:
+        await self._search_siren()
+        self.bot.replies.clear()
+        download = SongDownload("https://res01.hycdn.cn/big.wav", None, 0)
+
+        class FakeResponse:
+            headers = {"Content-Length": str(90 * 1024 * 1024)}
+
+            def __enter__(self) -> "FakeResponse":
+                return self
+
+            def __exit__(self, *args: object) -> bool:
+                return False
+
+        with patch("plugins.song_siren.fetch_siren_url", return_value=download), patch(
+            "plugins.song_siren.fetch_siren_cover", return_value=b"cover"
+        ), patch("plugins.song.request.urlopen", return_value=FakeResponse()), patch(
+            "plugins.song.download_song_source", self._write_source
+        ):
+            await self.plugin.handle(self.bot, None, self.event, self.command("/song 1"))
+
+        texts = "\n".join(reply_texts(self.bot))
+        self.assertIn("文件较大（约 90 MB），下载和上传可能需要较久", texts)
+        self.assertIn("正在下载源文件：WAV 无损", texts)
+        # 实际下载到的文件很小（<45MiB），仍走 base64 上传
+        self.assertEqual(len(self.bot.actions), 1)
+        action, params = self.bot.actions[0]
+        self.assertEqual(action, "upload_group_file")
+        self.assertTrue(params["file"].startswith("base64://"))
+
+    async def test_head_failure_skips_announce_but_downloads(self) -> None:
+        await self._search_siren()
+        self.bot.replies.clear()
+        download = SongDownload("https://res01.hycdn.cn/x.wav", None, 0)
+
+        with patch("plugins.song_siren.fetch_siren_url", return_value=download), patch(
+            "plugins.song_siren.fetch_siren_cover", return_value=None
+        ), patch("plugins.song.request.urlopen", side_effect=OSError("boom")), patch(
+            "plugins.song.download_song_source", self._write_source
+        ):
+            await self.plugin.handle(self.bot, None, self.event, self.command("/song 1"))
+
+        texts = "\n".join(reply_texts(self.bot))
+        self.assertNotIn("文件较大", texts)
+        self.assertIn("正在下载源文件：WAV 无损", texts)
+        self.assertEqual(len(self.bot.actions), 1)
+
+    async def test_gd_known_size_announced_without_head(self) -> None:
+        await self._search_gd()
+        self.bot.replies.clear()
+        download = SongDownload("https://cdn.example.com/song.flac", 71.2, 1682)
+
+        # 未 patch urlopen：若实现对已知大小仍发 HEAD 会真实联网导致失败
+        with patch("plugins.song.fetch_song_download", return_value=download), patch(
+            "plugins.song.fetch_song_cover", return_value=None
+        ), patch("plugins.song.download_song_source", self._write_source):
+            await self.plugin.handle(self.bot, None, self.event, self.command("/song 1"))
+
+        texts = "\n".join(reply_texts(self.bot))
+        self.assertIn("文件较大（约 71 MB）", texts)
+
+
+class SongStreamUploadTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.temp = self.enterContext(TemporaryDirectory())
+        self.bot = StubSongBot()
+        self.plugin = SongPlugin()
+        self.event = {"message_type": "group", "group_id": 100, "user_id": 111}
+        self.file_path = Path(self.temp) / "song.wav"
+
+    def _responder(self):
+        def responder(action, params):
+            if action == "upload_file_stream" and params.get("is_complete"):
+                return {
+                    "status": "ok",
+                    "retcode": 0,
+                    "data": {"status": "file_complete", "file_path": "/napcat/tmp/abc.wav"},
+                }
+            if action == "upload_file_stream":
+                return {
+                    "status": "ok",
+                    "retcode": 0,
+                    "data": {
+                        "received_chunks": params.get("chunk_index", 0) + 1,
+                        "total_chunks": params.get("total_chunks"),
+                    },
+                }
+            return {"status": "ok", "retcode": 0, "data": {}}
+
+        return responder
+
+    async def test_small_file_uses_base64(self) -> None:
+        self.file_path.write_bytes(b"ID3" + b"\x00" * 2048)
+        with patch("plugins.song.SONG_BASE64_UPLOAD_LIMIT_BYTES", 1024 * 1024):
+            sent = await self.plugin._send_song_file(self.bot, None, self.event, self.file_path, "歌")
+
+        self.assertTrue(sent)
+        self.assertEqual(self.bot.requests, [])
+        action, params = self.bot.actions[0]
+        self.assertEqual(action, "upload_group_file")
+        self.assertTrue(params["file"].startswith("base64://"))
+        self.assertTrue(params["name"].endswith(".wav"))
+
+    async def test_large_file_uses_stream_chunks(self) -> None:
+        payload = b"RIFF" + bytes(range(256)) * 1024  # 256KB + 4B
+        self.file_path.write_bytes(payload)
+        self.bot.request_responder = self._responder()
+        with patch("plugins.song.SONG_BASE64_UPLOAD_LIMIT_BYTES", 1024), patch(
+            "plugins.song.SONG_STREAM_CHUNK_BYTES", 64 * 1024
+        ):
+            sent = await self.plugin._send_song_file(self.bot, None, self.event, self.file_path, "歌")
+
+        self.assertTrue(sent)
+        stream_params = [params for action, params in self.bot.requests if action == "upload_file_stream"]
+        chunks = [params for params in stream_params if not params.get("is_complete")]
+        self.assertEqual(len(chunks), math.ceil(len(payload) / (64 * 1024)))
+        self.assertEqual(len({params["stream_id"] for params in chunks}), 1)
+        self.assertEqual([params["chunk_index"] for params in chunks], list(range(len(chunks))))
+        self.assertTrue(all(params["total_chunks"] == len(chunks) for params in chunks))
+        self.assertTrue(all(params["file_size"] == len(payload) for params in chunks))
+        self.assertTrue(all(params["expected_sha256"] == hashlib.sha256(payload).hexdigest() for params in chunks))
+        self.assertEqual(chunks[0]["filename"], safe_song_filename("歌", ".wav"))
+        self.assertEqual(chunks[0]["file_retention"], 60_000)
+
+        completed = [params for params in stream_params if params.get("is_complete")]
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(completed[0]["stream_id"], chunks[0]["stream_id"])
+
+        action, params = self.bot.actions[0]
+        self.assertEqual(action, "upload_group_file")
+        self.assertEqual(params["file"], "/napcat/tmp/abc.wav")
+        self.assertEqual(params["name"], safe_song_filename("歌", ".wav"))
+
+    async def test_stream_chunk_failure_returns_false(self) -> None:
+        self.file_path.write_bytes(b"RIFF" + b"\x00" * (256 * 1024))
+        calls = {"count": 0}
+        fallback = self._responder()
+
+        def responder(action, params):
+            calls["count"] += 1
+            if calls["count"] == 2:
+                return OneBotActionError("boom")
+            return fallback(action, params)
+
+        self.bot.request_responder = responder
+        with patch("plugins.song.SONG_BASE64_UPLOAD_LIMIT_BYTES", 1024), patch(
+            "plugins.song.SONG_STREAM_CHUNK_BYTES", 64 * 1024
+        ):
+            sent = await self.plugin._send_song_file(self.bot, None, self.event, self.file_path, "歌")
+
+        self.assertFalse(sent)
+        self.assertEqual(self.bot.actions, [])
+
+    async def test_stream_completion_without_file_path_returns_false(self) -> None:
+        self.file_path.write_bytes(b"RIFF" + b"\x00" * (256 * 1024))
+
+        def responder(action, params):
+            return {"status": "ok", "retcode": 0, "data": {"status": "file_complete"}}
+
+        self.bot.request_responder = responder
+        with patch("plugins.song.SONG_BASE64_UPLOAD_LIMIT_BYTES", 1024), patch(
+            "plugins.song.SONG_STREAM_CHUNK_BYTES", 64 * 1024
+        ):
+            sent = await self.plugin._send_song_file(self.bot, None, self.event, self.file_path, "歌")
+
+        self.assertFalse(sent)
+        self.assertEqual(self.bot.actions, [])
+
+    def test_file_sha256_matches_whole_file(self) -> None:
+        payload = bytes(range(256)) * 4096
+        self.file_path.write_bytes(payload)
+        self.assertEqual(file_sha256(self.file_path), hashlib.sha256(payload).hexdigest())
+
+    def test_precheck_prefers_known_size(self) -> None:
+        self.assertEqual(precheck_song_size("http://example.invalid/a.wav", 12.3), 12.3)
+
+    def test_precheck_uses_head_content_length(self) -> None:
+        class FakeResponse:
+            headers = {"Content-Length": str(90 * 1024 * 1024)}
+
+            def __enter__(self) -> "FakeResponse":
+                return self
+
+            def __exit__(self, *args: object) -> bool:
+                return False
+
+        with patch("plugins.song.request.urlopen", return_value=FakeResponse()):
+            self.assertEqual(precheck_song_size("http://example.invalid/big.wav", None), 90.0)
+
+    def test_precheck_head_failure_returns_none(self) -> None:
+        with patch("plugins.song.request.urlopen", side_effect=OSError("boom")):
+            self.assertIsNone(precheck_song_size("http://example.invalid/big.wav", None))
 
 
 class FakeWebSocket:

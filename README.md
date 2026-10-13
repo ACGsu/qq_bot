@@ -222,7 +222,9 @@ NAPCAT_WS_URL=ws://host.docker.internal:3001
 | `AUTO_CANDY_QQ` | 空 | 自动贴表情的目标 QQ；留空且无插件设置时不触发 |
 | `AUTO_EMOJI_IDS` | `127852,12951` | 表情 ID 列表，默认 🍬 和 ㊗ |
 | `AUTO_CANDY_EMOJI_ID` | `127852` | 旧版单表情兼容项；当前 Compose 的 `AUTO_EMOJI_IDS` 默认值会优先于它 |
-| `SONG_MAX_DOWNLOAD_MB` | `80` | 单个歌曲源文件下载上限，按 1024 × 1024 字节计算 MB |
+| `SONG_MAX_DOWNLOAD_MB` | `100` | 单个歌曲源文件下载上限，按 1024 × 1024 字节计算 MB；覆盖塞壬唱片 WAV 最大曲目（约 85MB） |
+| `SONG_BASE64_UPLOAD_LIMIT_MB` | `45` | 文件大小分界线：不超过该值走 base64 单帧上传；超过则走 NapCat Stream API 分片上传（避免超过 WebSocket 单帧 100MiB 上限），同时在下载前向用户预告耗时 |
+| `SONG_STREAM_CHUNK_KB` | `256` | Stream API 分片大小；以 85MB 文件为例约 340 次分片往返（单帧约 350KB），过慢可调大、被服务端拒绝可调小 |
 | `SONG_SESSION_MINUTES` | `10` | 歌曲候选会话有效期，单位分钟 |
 | `SONG_MUSIC_SOURCE` | `netease` | 音乐源：`netease`/`tencent`/`kuwo`/`tidal`/`qobuz`/`joox`/`bilibili`/`apple`/`ytmusic`/`spotify`；稳定源为 `netease`、`joox`、`bilibili`，部分源暂不开放 |
 | `SONG_BITRATE` | `320` | 不带音质参数时的默认音质；聊天内可选 `192`/`320`/`740`/`999`，740/999 为无损档（实际码率以上游返回为准） |
@@ -605,11 +607,23 @@ bot 会在**同一条消息**中返回歌曲详情（歌名、歌手、专辑、
 - 封面通过 `types=pic` 接口获取，以 base64 图片段内嵌在同一条消息中；封面获取失败时只发送文字详情，不影响下载。
 - 源文件格式按文件头自动识别（MP3/FLAC/M4A/WAV/OGG），文件名保留原始扩展名。
 - `SONG_MUSIC_SOURCE` 选择音乐源，默认 `netease`。若当前音源不支持所选音质，bot 会回复 `当前音源不支持所选音质（xxxkbps），请降低音质后重试。`
-- `SONG_MAX_DOWNLOAD_MB` 限制源文件大小，默认 80 MB。无损档单曲可能达 70 MB 以上，下载 999 音质失败时可调大此上限。
+- `SONG_MAX_DOWNLOAD_MB` 限制源文件大小，默认 100 MB。无损档单曲可能达 70 MB 以上，下载 999 音质失败时可调大此上限。
+- **大文件上传**：文件超过 `SONG_BASE64_UPLOAD_LIMIT_MB`（默认 45 MB）时，bot 会在下载前预告耗时，并使用 NapCat Stream API（v4.8.115+）分片上传，避免一次性将大文件塞入 WebSocket 帧导致连接被关闭；分片失败会明确提示上传失败。分片大小由 `SONG_STREAM_CHUNK_KB`（默认 256KB）控制。
 - 文件通过 NapCat 的 `upload_group_file` 或 `upload_private_file` 以 `base64://` 上传，不是 QQ 音乐卡片。发送动作后清理本地临时文件，无需在 bot 和 NapCat 之间共享下载目录。
 - 上游接口限制 5 分钟内不超过 50 次请求，触发限流时回复 `请求过于频繁，请稍后再试。`；歌曲无版权或已下架时回复 `该歌曲暂时无法获取下载链接，可能无版权或已下架。`；未找到时回复 `私密马赛，没有找到喵~`。
 
 > API 出处：[GD音乐台(music.gdstudio.xyz)](https://music.gdstudio.xyz/)，该接口声明仅限学习参考、严禁商用；音乐源可用性由上游动态调整。
+
+### 塞壬唱片（Monster Siren）音乐源
+
+在搜索关键词后加 `+塞壬唱片` 即可改从 [塞壬唱片](https://monster-siren.hypergryph.com/music) 搜索和下载：
+
+- `@bot /song 大地之盐+塞壬唱片`：在塞壬唱片站内搜索候选；**下载时不需要加后缀**，直接 `@bot /song 1` 即可。
+- 会话来源在搜索时一次锁定：塞壬会话的裸序号选择下载 WAV；**搜索时没加后缀的会话（默认源）当次不支持塞壬下载**，此时用 `+塞壬唱片` 选择会被拒绝并提示重新搜索。
+- 塞壬源固定提供 **WAV 无损**，没有音质选项；在塞壬会话中输入 `+192/320/740/999` 会被拒绝并提示改用裸序号；详情消息不显示文件大小（单曲通常 35 MB 左右）。
+- 曲库来自站点公开接口（`/api/songs` + `/api/albums`，约 900 首），按曲名 / 专辑名本地匹配；目录带 10 分钟缓存（`SIREN_CATALOG_TTL_MINUTES` 可调；该变量与 `SIREN_API_BASE_URL` 当前仅源码直接运行生效，Docker 部署需要时应自行添加到 Compose 的 `environment`）。
+- 封面为专辑封面（`/api/albums` 的 `coverUrl`），同样内嵌在详情同一条消息中；获取失败只发文字，不影响下载。
+- 塞壬唱片 WAV 单曲约 35~85MB，超过 `SONG_BASE64_UPLOAD_LIMIT_MB`（默认 45 MB）时 bot 会预告耗时并走 Stream API 分片上传（见上文「歌曲搜索与下载」的大文件上传说明）；默认 `SONG_MAX_DOWNLOAD_MB`（100 MB）可覆盖已知最大曲目，超限仍会下载失败并提示。
 
 ## 本地开发与测试
 
