@@ -2,20 +2,28 @@
 .env
 .env.*
 !.env.example
-plugin_config.json
+/plugin_config.json*
 
 # Python caches and environments
 __pycache__/
 *.py[cod]
 .pytest_cache/
-.coverage
+.mypy_cache/
+.ruff_cache/
+.coverage*
+coverage.xml
 htmlcov/
-.venv/
+.venv*/
 venv/
+.tox/
+.nox/
+build/
+dist/
+*.egg-info/
 
 # Runtime output
 *.log
-downloads/
+/downloads/
 
 # Editor and operating system files
 .vscode/
@@ -24,15 +32,15 @@ downloads/
 Thumbs.db
 
 # Timetable database and local backups (private runtime data)
-data/
-backups/
+/data/
+/backups/
 *.sqlite3*
 
 # Private timetable samples and manual render previews; never ship in the bot
 tmp pillow/
 
 # Independent host WebUI secrets and runtime
-.webui.env
+/.webui.env*
 .webui-*.lock
 .webui.lock
 .webui-*.tmp
@@ -41,7 +49,20 @@ tmp pillow/
 # Local tooling workspace data; never publish
 .workbuddy-ai/
 
-# Local scratch and planning notes; never publish
-_e2e/
-song功能修改计划-GDStudio.md
-to linux.md
+# New deployment layout: private configuration, login state and runtime data
+qqbot/config/*
+!qqbot/config/.gitkeep
+!qqbot/config/plugin_config.example.json
+!qqbot/config/webui.env.example
+qqbot/storage/**
+!qqbot/storage/**/
+!qqbot/storage/**/.gitkeep
+napcat/config/*
+!napcat/config/.gitkeep
+napcat/qq/*
+!napcat/qq/.gitkeep
+napcat/plugins/*
+!napcat/plugins/.gitkeep
+
+# Internal planning and implementation records; never publish
+NoneBot重构计划.md

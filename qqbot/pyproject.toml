@@ -1,0 +1,36 @@
+[project]
+name = "qqbot"
+version = "0.3.0"
+description = "NoneBot2 QQ bot with independent Docker WebUI"
+requires-python = ">=3.11"
+
+[tool.nonebot]
+adapters = [{ name = "OneBot V11", module_name = "nonebot.adapters.onebot.v11" }]
+plugins = ["plugins.core", "plugins.management", "nonebot_plugin_apscheduler"]
+plugin_dirs = []
+
+[tool.pytest.ini_options]
+testpaths = [
+  "tests/test_phase2_native.py",
+  "tests/test_phase8_cleanup.py",
+  "tests/test_timetable_ics.py",
+  "tests/test_timetable_store.py",
+  "tests/test_timetable_avatar.py",
+  "tests/test_timetable_image_service.py",
+  "tests/test_timetable_render.py",
+  "tests/test_timetable_files.py",
+  "tests/test_timetable_image_workflow.py",
+  "tests/test_timetable_configuration.py",
+  "tests/test_timetable_shared_store.py",
+  "tests/test_container_layout.py",
+  "tests/test_webui_api.py",
+  "tests/test_webui_config.py",
+  "tests/test_webui_docker.py",
+  "tests/test_webui_emoji.py",
+  "tests/test_webui_emoji_action.py",
+  "tests/test_webui_security.py",
+  "tests/test_webui_settings.py",
+]
+pythonpath = [".", "tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"

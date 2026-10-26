@@ -1,0 +1,27 @@
+**/__pycache__/
+**/*.py[cod]
+.git/
+.venv*/
+venv/
+.env
+.env.*
+.webui.env*
+.webui*.lock
+.webui-*.tmp
+config/
+storage/
+**/*.sqlite3*
+**/*.log
+tests/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+build/
+dist/
+*.egg-info/
+# Both Dockerfiles share this context and use explicit COPY selections.

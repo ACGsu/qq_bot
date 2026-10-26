@@ -1,0 +1,13 @@
+name: qqbot-tests
+services:
+  tests:
+    image: qqbot-tests:local
+    build:
+      context: ./qqbot
+      dockerfile: Dockerfile.test
+    init: true
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+    tmpfs:
+      - /tmp
+    # No production configuration, databases, QQ sessions or Docker socket.

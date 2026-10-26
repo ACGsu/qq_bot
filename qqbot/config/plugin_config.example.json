@@ -1,0 +1,20 @@
+{
+  "enabled_plugins": [
+    "basic"
+  ],
+  "plugin_settings": {
+    "auto_emoji": {
+      "target_qq": "",
+      "emoji_ids": "127852,12951"
+    },
+    "rps": {
+      "ban_seconds": "60"
+    },
+    "daily_wife": {
+      "marriage_enabled": "true"
+    },
+    "timetable": {
+      "group_isolation_enabled": "true"
+    }
+  }
+}

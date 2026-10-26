@@ -1,0 +1,24 @@
+ARG PYTHON_IMAGE=python:3.11-slim-bookworm@sha256:f06d01d4ba3f8ad5af45a3ec87df19c1d317d8e8961edc0fabda61811af6f7cf
+ARG DOCKER_CLI_IMAGE=docker:29-cli@sha256:5e6baf67325a79f64ed3bed6863954d5e05d0f3d4e57cbdb14809346814bbfdb
+FROM ${DOCKER_CLI_IMAGE} AS docker-cli
+FROM ${PYTHON_IMAGE}
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+WORKDIR /app
+
+# Client tools only; the management process uses the host Docker socket.
+COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
+COPY --from=docker-cli /usr/local/libexec/docker/cli-plugins/ /usr/local/libexec/docker/cli-plugins/
+
+COPY requirements/webui.lock ./requirements/webui.lock
+RUN python -m pip install --no-cache-dir --disable-pip-version-check --timeout 120 --retries 5 \
+    --require-hashes -r requirements/webui.lock
+COPY run_webui.py ./
+COPY services ./services
+COPY infrastructure ./infrastructure
+COPY webui ./webui
+RUN mkdir -p config storage/webui
+
+EXPOSE 8765
+CMD ["python", "run_webui.py"]

@@ -1,0 +1,140 @@
+name: ${COMPOSE_PROJECT_NAME:-qq_bot}
+
+services:
+  napcat:
+    image: ${NAPCAT_IMAGE:-mlikiowa/napcat-docker@sha256:b101b8968cc31ae428ec0f8e117386e4ced7773b2d8226ed9f7ddfcec55f1b7e}
+    restart: unless-stopped
+    environment:
+      ACCOUNT: ${BOT_QQ:-}
+      MODE: reverse_ws
+      ONEBOT_URL: ws://qq-bot:8080/onebot/v11/ws
+      WEBUI_TOKEN: ${NAPCAT_WEBUI_TOKEN:-}
+      NAPCAT_UID: ${NAPCAT_UID:-0}
+      NAPCAT_GID: ${NAPCAT_GID:-0}
+    ports:
+      - "127.0.0.1:${NAPCAT_WEBUI_PORT:-6099}:6099"
+    volumes:
+      - type: bind
+        source: ${HOST_PROJECT_ROOT:-.}/napcat/config
+        target: /app/napcat/config
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${HOST_PROJECT_ROOT:-.}/napcat/qq
+        target: /app/.config/QQ
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${HOST_PROJECT_ROOT:-.}/napcat/plugins
+        target: /app/napcat/plugins
+        bind:
+          create_host_path: false
+    depends_on:
+      - qq-bot
+    networks:
+      - qqbot-net
+
+  qq-bot:
+    image: qqbot-app:local
+    build:
+      context: ./qqbot
+      dockerfile: Dockerfile
+      args:
+        PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.11-slim-bookworm@sha256:f06d01d4ba3f8ad5af45a3ec87df19c1d317d8e8961edc0fabda61811af6f7cf}
+    container_name: my-bot
+    restart: unless-stopped
+    init: true
+    environment:
+      # Native NoneBot driver and OneBot v11 adapter.
+      DRIVER: "~fastapi+~httpx+~websockets"
+      HOST: 0.0.0.0
+      PORT: "8080"
+      ONEBOT_ACCESS_TOKEN: ${NAPCAT_ACCESS_TOKEN:-}
+      CORE_SELFTEST_ENABLED: "${CORE_SELFTEST_ENABLED:-false}"
+      SUPERUSERS: "${SUPERUSERS:-[]}"
+      MANAGEMENT_ACCESS_TOKEN: "${MANAGEMENT_ACCESS_TOKEN:-}"
+      STORAGE_ROOT: /app/storage
+      BOT_QQ: ${BOT_QQ:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      AUTO_CANDY_QQ: ${AUTO_CANDY_QQ:-}
+      AUTO_EMOJI_IDS: ${AUTO_EMOJI_IDS:-127852,12951}
+      AUTO_CANDY_EMOJI_ID: ${AUTO_CANDY_EMOJI_ID:-127852}
+      SONG_MAX_DOWNLOAD_MB: ${SONG_MAX_DOWNLOAD_MB:-100}
+      SONG_BASE64_UPLOAD_LIMIT_MB: ${SONG_BASE64_UPLOAD_LIMIT_MB:-35}
+      SONG_STREAM_CHUNK_KB: ${SONG_STREAM_CHUNK_KB:-256}
+      SONG_CACHE_TTL_HOURS: ${SONG_CACHE_TTL_HOURS:-24}
+      SONG_SESSION_MINUTES: ${SONG_SESSION_MINUTES:-10}
+      SONG_MUSIC_SOURCE: ${SONG_MUSIC_SOURCE:-netease}
+      SONG_BITRATE: ${SONG_BITRATE:-320}
+      BOT_PLUGIN_CONFIG: /app/config/plugin_config.json
+      TIMETABLE_DB_PATH: /app/storage/db/timetable.sqlite3
+      SONG_DOWNLOAD_DIR: /app/storage/downloads
+    volumes:
+      - type: bind
+        source: ${HOST_PROJECT_ROOT:-.}/qqbot/config
+        target: /app/config
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${HOST_PROJECT_ROOT:-.}/qqbot/storage
+        target: /app/storage
+        bind:
+          create_host_path: false
+    networks:
+      qqbot-net:
+        aliases:
+          - my-bot
+
+  webui:
+    image: qqbot-webui:local
+    build:
+      context: ./qqbot
+      dockerfile: Dockerfile.webui
+      args:
+        PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.11-slim-bookworm@sha256:f06d01d4ba3f8ad5af45a3ec87df19c1d317d8e8961edc0fabda61811af6f7cf}
+        DOCKER_CLI_IMAGE: ${DOCKER_CLI_IMAGE:-docker:29-cli@sha256:5e6baf67325a79f64ed3bed6863954d5e05d0f3d4e57cbdb14809346814bbfdb}
+    restart: unless-stopped
+    init: true
+    environment:
+      WEBUI_CONTAINER: "1"
+      WEBUI_PROJECT_ROOT: /workspace
+      WEBUI_ENV_FILE: /app/config/webui.env
+      WEBUI_CONFIG_PATH: /app/config/plugin_config.json
+      WEBUI_RUNTIME_DIR: /app/storage/webui
+      WEBUI_HOST: 0.0.0.0
+      WEBUI_PORT: "8765"
+      WEBUI_PUBLIC_PORT: ${WEBUI_PORT:-8765}
+      DOCKER_HOST: unix:///var/run/docker.sock
+      BOT_MANAGEMENT_URL: http://qq-bot:8080/internal/management/status
+    ports:
+      - "127.0.0.1:${WEBUI_PORT:-8765}:8765"
+    volumes:
+      # The WebUI credential file is mounted through /app/config.
+      - type: bind
+        source: ${HOST_PROJECT_ROOT:-.}
+        target: /workspace
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${HOST_PROJECT_ROOT:-.}/qqbot/config
+        target: /app/config
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${HOST_PROJECT_ROOT:-.}/qqbot/storage/webui
+        target: /app/storage/webui
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+        bind:
+          create_host_path: false
+    networks:
+      - qqbot-net
+
+networks:
+  qqbot-net:
+    driver: bridge
